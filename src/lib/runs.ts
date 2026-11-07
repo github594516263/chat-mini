@@ -13,6 +13,13 @@ import type { ChatEvent, SeqEvent } from "@/lib/protocol";
 
 export type RunStatus = "running" | "done" | "error" | "aborted";
 
+/** 落库归属：登录用户的 run 才有这些字段（游客的 run 只在内存里） */
+export type RunMeta = {
+  userId?: string;
+  sessionId?: string;
+  messageId?: string;
+};
+
 /** 压缩后的正文快照，配合 seq 使用：这个 seq 及之前的内容都折叠在 content 里了 */
 type RunSnapshot = { seq: number; content: string; thinking: string };
 
@@ -29,6 +36,7 @@ export type Run = {
   snapshot: RunSnapshot | null;
   subscribers: Set<Subscriber>;
   abort: AbortController;
+  meta: RunMeta;
   createdAt: number;
   updatedAt: number;
 };
@@ -43,7 +51,7 @@ const KEEP_EVENTS = 100;
 const globalForRuns = globalThis as unknown as { __chatRuns?: Map<string, Run> };
 const runs: Map<string, Run> = (globalForRuns.__chatRuns ??= new Map<string, Run>());
 
-export function createRun(): Run {
+export function createRun(meta: RunMeta = {}): Run {
   sweep();
   const run: Run = {
     id: `run_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`,
@@ -52,6 +60,7 @@ export function createRun(): Run {
     snapshot: null,
     subscribers: new Set(),
     abort: new AbortController(),
+    meta,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };

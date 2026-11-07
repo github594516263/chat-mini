@@ -59,7 +59,20 @@ node scripts/create-user.mjs 你的用户名
 curl http://localhost:3000/api/health     # 数据库连上了吗、表建齐了吗
 node scripts/e2e-auth.mjs                 # 16 项认证检查（登录/登出/限流/CSRF/越权报文）
 node scripts/e2e-sessions-api.mjs         # 23 项会话接口检查（隔离/分页/搜索/软删）
+node scripts/e2e-chat-server.mjs          # 21 项服务端生成检查（落库/取消/重启降级）
 ```
+
+生成的两条路径（同一个 `POST /api/chat`）：
+
+```
+登录用户  { sessionId, content }    服务端从库里取历史 → 写用户消息 → 写助手占位 → 流式
+                                    → 每 1 秒把半截正文写回库 → 结束定稿 complete/stopped/error
+游客      { messages: [...] }       只生成，不写库（数据在浏览器本地）
+```
+
+进程重启时 `src/instrumentation.ts` 会把上一轮残留的 `status='running'` 全部收拾掉：
+消息标成 `interrupted`（保留已输出的内容），让界面显示"生成中断 + 继续生成"——
+因为生成跑在内存里，进程一没，那条流就真的没了，库里存的只是它写过的部分。
 
 会话与消息接口（都要登录，全部按 `user_id` 隔离，越权一律 404）：
 

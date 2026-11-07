@@ -320,34 +320,36 @@ export async function updateMessage(
   const sets: string[] = [];
   const params: (string | number | Date | null)[] = [];
 
+  // 列名必须带 m. 前缀：messages 和 chat_sessions 都有 updated_at，
+  // 不限定表名会报 ER_NON_UNIQ_ERROR: Column 'updated_at' in field list is ambiguous
   if (patch.content !== undefined) {
-    sets.push("content = ?");
+    sets.push("m.content = ?");
     params.push(patch.content);
   }
   if (patch.thinking !== undefined) {
-    sets.push("thinking = ?");
+    sets.push("m.thinking = ?");
     params.push(patch.thinking);
   }
   if (patch.status !== undefined) {
-    sets.push("status = ?");
+    sets.push("m.status = ?");
     params.push(patch.status);
   }
   if (patch.errorText !== undefined) {
-    sets.push("error_text = ?");
+    sets.push("m.error_text = ?");
     params.push(patch.errorText);
   }
   if (patch.promptTokens !== undefined) {
-    sets.push("prompt_tokens = ?");
+    sets.push("m.prompt_tokens = ?");
     params.push(patch.promptTokens);
   }
   if (patch.completionTokens !== undefined) {
-    sets.push("completion_tokens = ?");
+    sets.push("m.completion_tokens = ?");
     params.push(patch.completionTokens);
   }
-  if (patch.clearRun) sets.push("run_id = NULL");
+  if (patch.clearRun) sets.push("m.run_id = NULL");
   if (sets.length === 0) return false;
 
-  sets.push("updated_at = ?");
+  sets.push("m.updated_at = ?");
   params.push(new Date());
 
   // 归属校验放在 SQL 里：会话不是这个人的，就一条都影响不到
@@ -359,6 +361,83 @@ export async function updateMessage(
     [...params, messageId, sessionId, userId],
   );
   return result.affectedRows > 0;
+}
+
+// ---------------------------------------------------------------- 生成任务（runs）
+
+export type RunRowStatus = "running" | "done" | "error" | "aborted";
+
+/** 建 run 时落一行元信息：进程重启后据此把没写完的回答标成 interrupted */
+export async function createRunRow(input: {
+  id: string;
+  userId: string;
+  sessionId: string;
+  messageId: string;
+}): Promise<void> {
+  const now = new Date();
+  await execute(
+    `INSERT INTO runs (id, user_id, session_id, message_id, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'running', ?, ?)`,
+    [input.id, input.userId, input.sessionId, input.messageId, now, now],
+  );
+}
+
+export async function finishRunRow(runId: string, status: RunRowStatus): Promise<void> {
+  await execute(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`, [status, new Date(), runId]);
+}
+
+/**
+ * 启动清理（P4 的核心之一）：
+ * 上一进程留下的 status='running' 不可能还活着 —— 生成跑在内存里，进程一没就断了。
+ * 所以把它们对应的消息标成 interrupted，让界面显示"生成中断 + 继续生成"，
+ * 而不是留一个永远转圈的 streaming。
+ */
+export async function markStaleRuns(): Promise<{ messages: number; runs: number }> {
+  const now = new Date();
+
+  const messages = await execute(
+    `UPDATE messages m
+       JOIN runs r ON r.message_id = m.id
+        SET m.status = 'interrupted', m.run_id = NULL, m.updated_at = ?
+      WHERE r.status = 'running' AND m.status = 'streaming'`,
+    [now],
+  );
+
+  // 没有对应 run 行、但仍卡在 streaming 的消息（极端情况：建完消息进程就崩了）
+  const orphans = await execute(
+    `UPDATE messages SET status = 'interrupted', run_id = NULL, updated_at = ?
+      WHERE status = 'streaming'
+        AND id NOT IN (SELECT message_id FROM runs WHERE status = 'running' AND message_id IS NOT NULL)`,
+    [now],
+  );
+
+  const runs = await execute(`UPDATE runs SET status = 'error', updated_at = ? WHERE status = 'running'`, [now]);
+
+  return { messages: messages.affectedRows + orphans.affectedRows, runs: runs.affectedRows };
+}
+
+/** 给 provider 的历史：只要 role + 有内容的正文，取最近 N 条再按 seq 正序返回 */
+export async function listHistory(
+  userId: string,
+  sessionId: string,
+  limit = 100,
+): Promise<{ role: "user" | "assistant"; content: string }[]> {
+  const rows = await query<RowDataPacket & { role: string; content: string }>(
+    `SELECT t.role, t.content FROM (
+       SELECT m.seq, m.role, m.content
+         FROM messages m
+         JOIN chat_sessions s ON s.id = m.session_id
+        WHERE m.session_id = ? AND s.user_id = ? AND m.content <> '' AND m.status <> 'streaming'
+        ORDER BY m.seq DESC
+        LIMIT ?
+     ) t ORDER BY t.seq ASC`,
+    [sessionId, userId, limit],
+  );
+
+  return rows.map((row) => ({
+    role: row.role === "user" ? "user" : "assistant",
+    content: row.content,
+  }));
 }
 
 // ---------------------------------------------------------------- 搜索

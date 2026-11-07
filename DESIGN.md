@@ -360,7 +360,7 @@ GET    /api/health                                   不需要登录（出问题
 | **P1** | 建库建表 + 连接层 + 健康检查 | ✅ **已完成** |
 | **P2** | 注册/登录/登出/me + `/login` 页面 + 命令行建号脚本 | ✅ **已完成** |
 | **P3** | 会话/消息 CRUD（带 `user_id` 隔离）+ 搜索 | ✅ **已完成** |
-| P4 | 生成端改造（服务端取历史 + 秒级落盘 + 启动清理 running） | 待做 |
+| **P4** | 生成端改造（服务端取历史 + 秒级落盘 + 启动清理 running） | ✅ **已完成** |
 | P5 | 前端接入（服务端为真相 + 本地缓存降级） | 待做 |
 | P6 | 回归 7 个 e2e + 新增认证/越权/重启 3 个 | 待做 |
 
@@ -446,6 +446,40 @@ demo2        1        0         2
 软删除的会话仍在库里（deleted_at 有值，title='改名后的会话'）——数据没被真删
 ```
 
+### P4 验收证据
+
+```
+node scripts/e2e-chat-server.mjs → 21/21 通过
+
+生成与落库
+✅ 登录用户 POST /api/chat → 200 mode=server
+✅ 返回用户消息 seq=1、助手占位 seq=2 status=streaming
+✅ 会话标题按首条消息自动生成
+✅ 订阅拿到完整事件流（108 个事件，末事件 completed）
+✅ 落库内容与流式内容一字不差（库里 188 字 / 流里 188 字）
+✅ 定稿状态 complete、run_id 清空、用量落库（prompt=12 completion=105）
+✅ runs 表状态 done
+
+不订阅也在生成（证明生成不挂在连接上）
+✅ 1.6 秒后库里已有半截正文且 status=streaming
+✅ 取消 → cancelled=true，1.5 秒后 status=stopped 且保留 251 字
+✅ runs 表状态 aborted
+
+隔离与游客
+✅ B 用 A 的 sessionId 生成 → 404
+✅ 游客 POST（messages 数组）→ 200 mode=guest
+✅ 游客生成不写库（22 → 22 条）
+✅ 缺 sessionId 时降级为游客路径，不报错
+
+进程重启自动降级（手工演练）
+重启前：msg-crash-ai status=streaming（残留 14 字），run status=running
+重启后：msg-crash-ai status=interrupted（14 字保留），run status=error
+dev 日志：[startup] 清理上次残留：4 条消息标为生成中断，1 个 run 标为 error
+            ↑ 其中 3 条是调 bug 期间留下的真孤儿，说明孤儿路径也覆盖到了
+```
+
+回归：`e2e-auth` 16/16、`e2e-sessions-api` 23/23、`e2e-chat`（游客）9 步、`e2e-resume` 断线续传全部通过。
+
 ### P1 验收证据
 
 ```
@@ -486,6 +520,8 @@ scripts/selfcheck.sql:
 4. **`cookies()` 在 Server Component 里只能读不能写**：写 cookie 会抛错。所以滑动续期只在路由处理器里做（`getCurrentUser({ renew: true })` 只在 `/api/auth/me` 调用），Server Component 里只更新 `last_seen_at`。
 5. **非交互式输入要按行缓冲**：`scripts/create-user.mjs` 从管道读两行密码时，一次 `data` 事件可能同时带来两行；每条读取各挂监听器会吞掉第二行。改用行队列后正常。
 6. **静态路由优先于动态段**：`/api/sessions/search` 与 `/api/sessions/[id]` 并存时，Next 会先匹配静态的 `search`，不会把它当成一个 id。所以搜索接口可以直接放在同一层级，不用挪到 `/api/search`。
+7. **`UPDATE ... JOIN` 的 `SET` 列必须带表别名**：`messages` 和 `chat_sessions` 都有 `updated_at`，写成 `SET content = ?, updated_at = ?` 会报 `ER_NON_UNIQ_ERROR: Column 'updated_at' in field list is ambiguous`。必须写 `SET m.content = ?, m.updated_at = ?`。这个 bug 当时被 `catch {}` 吞掉了，表现是"生成正常但库里一直是空的"，所以**落盘失败一定要打日志**，静默 catch 会让排查成本翻十倍。
+8. **上游 provider 被 abort 时可能"正常结束"**（生成器 `return` 而不是 `throw`）。只靠 `catch` 判断用户是否点了停止会把它记成 `complete`。必须以 `run.abort.signal.aborted` 为准。
 
 ---
 

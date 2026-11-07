@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 
 import { getCurrentUser } from "@/lib/auth";
-import { startServerRun } from "@/lib/chat-service";
+import { startGeneration, type GenerationOp } from "@/lib/chat-service";
 import { isSameOrigin } from "@/lib/http";
 import { sanitizeMessages, type ChatEvent, type WireMessage } from "@/lib/protocol";
 import { deepseekProvider } from "@/lib/providers/deepseek";
@@ -28,7 +28,13 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "invalid json" }, { status: 400 });
   }
 
-  const body = (raw ?? {}) as { sessionId?: unknown; content?: unknown; messages?: unknown };
+  const body = (raw ?? {}) as {
+    sessionId?: unknown;
+    content?: unknown;
+    kind?: unknown;
+    messageId?: unknown;
+    messages?: unknown;
+  };
   const user = await getCurrentUser();
 
   // ---------- 登录用户：服务端持久化路径 ----------
@@ -37,12 +43,31 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: "跨站请求被拒绝" }, { status: 403 });
     }
 
+    const sessionId = body.sessionId;
+    const kind = typeof body.kind === "string" ? body.kind : "send";
     const content = typeof body.content === "string" ? body.content.trim() : "";
-    if (!content) {
-      return Response.json({ error: "content is required" }, { status: 400 });
+    const messageId = typeof body.messageId === "string" ? body.messageId : "";
+
+    let op: GenerationOp;
+    if (kind === "send") {
+      if (!content) return Response.json({ error: "content is required" }, { status: 400 });
+      op = { kind: "send", content };
+    } else if (kind === "regenerate") {
+      if (!messageId) return Response.json({ error: "messageId is required" }, { status: 400 });
+      op = { kind: "regenerate", messageId };
+    } else if (kind === "edit") {
+      if (!messageId || !content) {
+        return Response.json({ error: "messageId and content are required" }, { status: 400 });
+      }
+      op = { kind: "edit", messageId, content };
+    } else if (kind === "continue") {
+      if (!messageId) return Response.json({ error: "messageId is required" }, { status: 400 });
+      op = { kind: "continue", messageId };
+    } else {
+      return Response.json({ error: `unknown kind: ${kind}` }, { status: 400 });
     }
 
-    const result = await startServerRun(user.id, body.sessionId, content);
+    const result = await startGeneration(user.id, sessionId, op);
     if (!result.ok) {
       return Response.json(
         { error: result.message, ...(result.hint ? { hint: result.hint } : {}) },

@@ -1,4 +1,4 @@
-import type { ChatEvent } from "@/lib/protocol";
+import type { ChatEvent, WireMessage } from "@/lib/protocol";
 import type { ChatProvider } from "@/lib/providers/base";
 import { deepseekProvider } from "@/lib/providers/deepseek";
 import { fakeProvider } from "@/lib/providers/fake";
@@ -8,9 +8,12 @@ import {
   createRunRow,
   deriveTitle,
   finishRunRow,
+  getMessage,
   getSession,
   listHistory,
+  markMessageStreaming,
   renameSession,
+  truncateFrom,
   updateMessage,
   type MessageDto,
   type SessionDto,
@@ -25,66 +28,76 @@ import { explainDbError } from "@/lib/db";
  *   - 用户消息 + 助手占位消息在开跑前就落库（seq 连续）
  *   - 流式期间按 1 秒节流把半截正文写回库：进程崩了，库里还有已输出的部分
  *   - 结束时定稿状态：complete / stopped / error
+ *
+ * 四个操作都收敛到这里，因为它们只差"怎么准备历史 / 从哪条消息开始"：
+ *   send        追加用户消息 + 新助手消息
+ *   regenerate  丢掉某条助手消息及其之后，重发它前面那条用户消息
+ *   edit        改掉某条用户消息及其之后，用新内容重发
+ *   continue    复用那条助手消息接着写（不删内容，只把 run 换成新的）
  */
 
 /** 半截正文的落盘间隔。太频繁没必要（一秒钟的内容谁也看不出差别），太慢兜不住崩溃 */
 const FLUSH_INTERVAL_MS = 1000;
+
+/** 续写用的隐藏指令：不进数据库、不显示在界面，只在服务端拼进历史 */
+const CONTINUE_PROMPT =
+  "（上一条回答中断了。请紧接着断掉的地方继续写下去，不要重复已经输出过的东西，也不要重新开头。）";
+
+export type GenerationOp =
+  | { kind: "send"; content: string }
+  | { kind: "regenerate"; messageId: string }
+  | { kind: "edit"; messageId: string; content: string }
+  | { kind: "continue"; messageId: string };
 
 export type StartResult =
   | {
       ok: true;
       runId: string;
       session: SessionDto;
-      userMessage: MessageDto;
+      userMessage: MessageDto | null;
       assistantMessage: MessageDto;
     }
   | { ok: false; status: number; message: string; hint?: string };
+
+type Prepared = {
+  history: WireMessage[];
+  assistantMessage: MessageDto;
+  baseLen: number;
+  userMessage: MessageDto | null;
+};
+
+/** 准备阶段的结果：null=消息不存在（404），{error}=参数不合法（400），否则正常 */
+type PrepareResult = Prepared | { error: string } | null;
 
 function pickProvider(): ChatProvider {
   const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
   return apiKey ? deepseekProvider({ apiKey }) : fakeProvider;
 }
 
-export async function startServerRun(
+export async function startGeneration(
   userId: string,
   sessionId: string,
-  content: string,
+  op: GenerationOp,
 ): Promise<StartResult> {
   const session = await getSession(userId, sessionId);
-  if (!session) {
-    return { ok: false, status: 404, message: "会话不存在" };
-  }
+  if (!session) return { ok: false, status: 404, message: "会话不存在" };
 
   try {
-    const userMessage = await appendMessage(userId, sessionId, {
-      role: "user",
-      content,
-      status: "complete",
-    });
-    if (!userMessage) return { ok: false, status: 404, message: "会话不存在" };
+    const prepared = await prepare(userId, sessionId, op);
+    if (!prepared) return { ok: false, status: 404, message: "消息不存在" };
+    if ("error" in prepared) return { ok: false, status: 400, message: prepared.error };
 
-    // 首条消息自动命名（和前端原来的习惯保持一致）
-    const title =
-      session.messageCount === 0 && session.title === "新对话" ? deriveTitle(content) : null;
-    if (title) await renameSession(userId, sessionId, title);
-
-    // 注意顺序：先落用户消息，再取历史（这样历史里包含这句新问题）
-    const history = await listHistory(userId, sessionId);
-
-    const assistantMessage = await appendMessage(userId, sessionId, {
-      role: "assistant",
-      content: "",
-      status: "streaming",
-    });
-    if (!assistantMessage) return { ok: false, status: 404, message: "会话不存在" };
+    const { history, assistantMessage, baseLen, userMessage } = prepared;
 
     const run = createRun({ userId, sessionId, messageId: assistantMessage.id });
+    await markMessageStreaming(userId, sessionId, assistantMessage.id, run.id);
     // 落一行元信息：进程重启后靠它把这条消息标成 interrupted
     await createRunRow({
       id: run.id,
       userId,
       sessionId,
       messageId: assistantMessage.id,
+      baseLen,
     });
 
     // 故意不 await：POST 只负责把 runId 交出去
@@ -93,6 +106,7 @@ export async function startServerRun(
       userId,
       sessionId,
       messageId: assistantMessage.id,
+      baseLen,
       history,
     });
 
@@ -101,11 +115,97 @@ export async function startServerRun(
       runId: run.id,
       session: (await getSession(userId, sessionId)) ?? session,
       userMessage,
-      assistantMessage,
+      assistantMessage: { ...assistantMessage, status: "streaming", runId: run.id, baseLen },
     };
   } catch (error) {
     return { ok: false, status: 500, message: "创建生成任务失败", hint: explainDbError(error) };
   }
+}
+
+async function prepare(
+  userId: string,
+  sessionId: string,
+  op: GenerationOp,
+): Promise<PrepareResult> {
+  if (op.kind === "send") {
+    const userMessage = await appendMessage(userId, sessionId, {
+      role: "user",
+      content: op.content,
+      status: "complete",
+    });
+    if (!userMessage) return null;
+
+    const session = await getSession(userId, sessionId);
+    if (session && session.messageCount <= 1 && session.title === "新对话") {
+      await renameSession(userId, sessionId, deriveTitle(op.content));
+    }
+
+    // 顺序很重要：先落用户消息，再取历史（这样历史里包含这句新问题）
+    const history = await listHistory(userId, sessionId);
+    const assistantMessage = await appendMessage(userId, sessionId, {
+      role: "assistant",
+      content: "",
+      status: "streaming",
+    });
+    if (!assistantMessage) return null;
+    return { history, assistantMessage, baseLen: 0, userMessage };
+  }
+
+  const target = await getMessage(userId, sessionId, op.messageId);
+  if (!target) return null;
+
+  if (op.kind === "regenerate") {
+    if (target.role !== "assistant") return { error: "只能对助手消息重新生成" };
+    // 丢掉这条助手消息及其之后的所有内容
+    await truncateFrom(userId, sessionId, target.seq);
+    const history = await listHistory(userId, sessionId);
+    const assistantMessage = await appendMessage(userId, sessionId, {
+      role: "assistant",
+      content: "",
+      status: "streaming",
+    });
+    if (!assistantMessage) return null;
+    return { history, assistantMessage, baseLen: 0, userMessage: null };
+  }
+
+  if (op.kind === "edit") {
+    if (target.role !== "user") return { error: "只能编辑用户消息" };
+    // 从这条用户消息开始整段重来（删掉后 appendMessage 会把 seq 重新算成同一个号）
+    await truncateFrom(userId, sessionId, target.seq);
+    const userMessage = await appendMessage(userId, sessionId, {
+      role: "user",
+      content: op.content,
+      status: "complete",
+    });
+    if (!userMessage) return null;
+
+    if (userMessage.seq === 1) {
+      await renameSession(userId, sessionId, deriveTitle(op.content));
+    }
+
+    const history = await listHistory(userId, sessionId);
+    const assistantMessage = await appendMessage(userId, sessionId, {
+      role: "assistant",
+      content: "",
+      status: "streaming",
+    });
+    if (!assistantMessage) return null;
+    return { history, assistantMessage, baseLen: 0, userMessage };
+  }
+
+  // continue：什么都不删，历史 = 已有消息 + 一条隐藏指令，输出接到同一条消息上
+  if (target.role !== "assistant") return { error: "只能续写助手消息" };
+  if (!target.content.trim()) return { error: "这条消息还没有内容，无法续写" };
+
+  const history = await listHistory(userId, sessionId);
+  history.push({ role: "user", content: CONTINUE_PROMPT });
+
+  return {
+    history,
+    assistantMessage: target,
+    baseLen: target.content.length,
+    userMessage: null,
+  };
 }
 
 async function driveServerRun(args: {
@@ -113,12 +213,19 @@ async function driveServerRun(args: {
   userId: string;
   sessionId: string;
   messageId: string;
-  history: { role: "user" | "assistant"; content: string }[];
+  baseLen: number;
+  history: WireMessage[];
 }): Promise<void> {
-  const { run, userId, sessionId, messageId, history } = args;
+  const { run, userId, sessionId, messageId, baseLen, history } = args;
 
   let seq = 0;
+  // 续写时库里已有前缀，新的增量接在它后面。
+  // 前端断线续传也按同一个 baseLen 留前缀，两边规则一致。
   let content = "";
+  if (baseLen > 0) {
+    const existing = await getMessage(userId, sessionId, messageId);
+    content = (existing?.content ?? "").slice(0, baseLen);
+  }
   let thinking = "";
   let promptTokens: number | null = null;
   let completionTokens: number | null = null;

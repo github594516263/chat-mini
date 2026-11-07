@@ -60,19 +60,28 @@ curl http://localhost:3000/api/health     # 数据库连上了吗、表建齐了
 node scripts/e2e-auth.mjs                 # 16 项认证检查（登录/登出/限流/CSRF/越权报文）
 node scripts/e2e-sessions-api.mjs         # 23 项会话接口检查（隔离/分页/搜索/软删）
 node scripts/e2e-chat-server.mjs          # 21 项服务端生成检查（落库/取消/重启降级）
+node scripts/e2e-logged-in.mjs            # 19 项浏览器实测（需先起无头 Chrome，见脚本头）
 ```
 
 生成的两条路径（同一个 `POST /api/chat`）：
 
 ```
-登录用户  { sessionId, content }    服务端从库里取历史 → 写用户消息 → 写助手占位 → 流式
-                                    → 每 1 秒把半截正文写回库 → 结束定稿 complete/stopped/error
-游客      { messages: [...] }       只生成，不写库（数据在浏览器本地）
+登录用户  { sessionId, kind, content|messageId }
+          kind=send|regenerate|edit|continue
+          服务端从库里取历史 → 写消息 → 流式每秒落盘 → 结束定稿
+游客      { messages: [...] }
+          只生成，不写库（数据在浏览器本地）
 ```
 
+登录后数据在服务端：
+
+- 会话列表、消息、标题都在 MySQL 里，换浏览器/清缓存都还在
+- `localStorage` 只剩一个"上次看的是哪个会话"的标记
+- 刷新时如果那条回答正在生成，会带着水位自动续上；进程崩过的话显示"生成中断 + 继续生成"
+
 进程重启时 `src/instrumentation.ts` 会把上一轮残留的 `status='running'` 全部收拾掉：
-消息标成 `interrupted`（保留已输出的内容），让界面显示"生成中断 + 继续生成"——
-因为生成跑在内存里，进程一没，那条流就真的没了，库里存的只是它写过的部分。
+消息标成 `interrupted`（保留已输出的内容）——因为生成跑在内存里，进程一没，那条流就真的没了，
+库里存的只是它写过的部分。
 
 会话与消息接口（都要登录，全部按 `user_id` 隔离，越权一律 404）：
 
@@ -149,11 +158,16 @@ GET    /api/sessions/search?q=             标题 LIKE + 正文 ngram 全文索�
 | `src/app/api/chat/stream/route.ts` | 订阅 run：`?runId=&afterSeq=` 先回放再实时推 |
 | `src/app/api/chat/cancel/route.ts` | 停掉服务端生成（否则"停止"只是不看了，token 还在烧） |
 | `src/lib/runs.ts` | 进程内 run 表：事件缓冲、订阅广播、按 seq 压缩成快照、TTL 清理 |
+| `src/lib/chat-repo.ts` | 会话/消息的数据访问：所有查询强制带 `user_id`、seq 事务内分配、软删除、ngram 搜索 |
+| `src/lib/chat-service.ts` | 登录用户的生成：取历史、四种操作（send/regenerate/edit/continue）、每秒落盘、定稿 |
+| `src/lib/api-guard.ts` | `requireUser()`：没登录就 401，路由里一眼看得见 |
+| `src/lib/startup.ts` | 启动清理：残留的 `running` 标成 interrupted、过期登录会话清掉 |
+| `src/instrumentation.ts` | Next 启动钩子，把上面的清理挂到进程启动 |
 | `src/lib/protocol.ts` | 事件类型 + 编解码 + 上行报文清洗 |
 | `src/lib/providers/fake.ts` | 假数据流（带 think_delta、表格、代码块） |
 | `src/lib/providers/deepseek.ts` | 真数据流：把 DeepSeek 的 SSE 翻译成我们自己的事件（支持 `DEEPSEEK_BASE_URL`） |
 | `src/lib/sessions.ts` | 会话存储层：读写 localStorage、标题派生、旧版数据迁移、`pending` 状态归一 |
-| `src/lib/use-chat.ts` | 会话 + 生成的唯一状态源：建 run、按 seq 消费、刷新后按水位续传；`send/regenerate/editAndResend/continueGeneration` 共用一条 `startRun` |
+| `src/lib/use-chat.ts` | 会话 + 生成的唯一状态源。一个引擎两个后端：游客走 localStorage，登录走服务端 API；`send/regenerate/editAndResend/continueGeneration` 共用一条续传链路 |`startRun` |
 | `src/components/sidebar.tsx` | 会话列表：新建 / 切换 / 删除 / 搜索 / 重命名 / 自动标题 |
 | `src/lib/theme.ts` | 主题三态：读写偏好、解析 system、首屏内联脚本字符串 |
 | `src/lib/use-theme.ts` | 主题状态 hook：挂载读偏好、监听系统配色、只改 `<html class>` |

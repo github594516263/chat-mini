@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS runs (
   user_id    CHAR(36)    NULL COMMENT '游客的 run 可以为空',
   session_id CHAR(36)    NULL,
   message_id CHAR(36)    NULL,
+  base_len   INT UNSIGNED NOT NULL DEFAULT 0
+             COMMENT 'run 开始时该消息已有多少字（续写用：前缀 + 本次输出 = 全文）',
   status     ENUM('running','done','error','aborted') NOT NULL,
   created_at DATETIME(3) NOT NULL,
   updated_at DATETIME(3) NOT NULL,

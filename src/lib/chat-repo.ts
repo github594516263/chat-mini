@@ -36,6 +36,8 @@ export type MessageRow = RowDataPacket & {
   completion_tokens: number | null;
   status: "streaming" | "complete" | "interrupted" | "stopped" | "error";
   error_text: string | null;
+  run_id: string | null;
+  run_base_len?: number | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -58,6 +60,10 @@ export type MessageDto = {
   errorText: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
+  /** 正在跑这次消息的 run（仅 status=streaming 时有）：刷新后据此续传 */
+  runId: string | null;
+  /** 这条 run 开始时消息已有多少字：续传时 content 的前 baseLen 个字符是旧内容 */
+  baseLen: number;
   createdAt: string;
 };
 
@@ -100,6 +106,8 @@ export function toMessageDto(row: MessageRow): MessageDto {
     errorText: row.error_text,
     promptTokens: row.prompt_tokens,
     completionTokens: row.completion_tokens,
+    runId: row.run_id ?? null,
+    baseLen: Number(row.run_base_len ?? 0),
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -209,8 +217,10 @@ export async function listMessages(
   const rows = await query<MessageRow>(
     `SELECT m.id, m.session_id, m.seq, m.role, m.content, m.thinking,
             m.prompt_tokens, m.completion_tokens, m.status, m.error_text,
+            m.run_id, COALESCE(r.base_len, 0) AS run_base_len,
             m.created_at, m.updated_at
        FROM messages m
+       LEFT JOIN runs r ON r.id = m.run_id
       WHERE m.session_id = ? AND m.seq > ?
       ORDER BY m.seq ASC
       LIMIT ?`,
@@ -218,6 +228,64 @@ export async function listMessages(
   );
 
   return { session, messages: rows.map(toMessageDto) };
+}
+
+/** 单条消息（带归属校验） */
+export async function getMessage(
+  userId: string,
+  sessionId: string,
+  messageId: string,
+): Promise<MessageDto | null> {
+  const row = await queryOne<MessageRow>(
+    `SELECT m.id, m.session_id, m.seq, m.role, m.content, m.thinking,
+            m.prompt_tokens, m.completion_tokens, m.status, m.error_text,
+            m.run_id, COALESCE(r.base_len, 0) AS run_base_len,
+            m.created_at, m.updated_at
+       FROM messages m
+       JOIN chat_sessions s ON s.id = m.session_id
+       LEFT JOIN runs r ON r.id = m.run_id
+      WHERE m.id = ? AND m.session_id = ? AND s.user_id = ? AND s.deleted_at IS NULL
+      LIMIT 1`,
+    [messageId, sessionId, userId],
+  );
+  return row ? toMessageDto(row) : null;
+}
+
+/**
+ * 物理删除 seq >= fromSeq 的消息。
+ * 用于"重新生成 / 编辑重发"：这两个操作的本质就是把分叉点之后的内容丢掉重来。
+ * 不用软删除：这些消息是模型输出的分支，没有任何"挽回"的价值，
+ * 留着反而会让 seq 空洞、让历史拼接出现幽灵上下文。
+ */
+export async function truncateFrom(
+  userId: string,
+  sessionId: string,
+  fromSeq: number,
+): Promise<number> {
+  const result = await execute(
+    `DELETE m FROM messages m
+       JOIN chat_sessions s ON s.id = m.session_id
+      WHERE m.session_id = ? AND m.seq >= ? AND s.user_id = ?`,
+    [sessionId, fromSeq, userId],
+  );
+  return result.affectedRows;
+}
+
+/** 续写：复用同一条消息接着写，把它的 run_id 换成新的 run */
+export async function markMessageStreaming(
+  userId: string,
+  sessionId: string,
+  messageId: string,
+  runId: string,
+): Promise<boolean> {
+  const result = await execute(
+    `UPDATE messages m
+       JOIN chat_sessions s ON s.id = m.session_id
+        SET m.status = 'streaming', m.run_id = ?, m.error_text = NULL, m.updated_at = ?
+      WHERE m.id = ? AND m.session_id = ? AND s.user_id = ? AND s.deleted_at IS NULL`,
+    [runId, new Date(), messageId, sessionId, userId],
+  );
+  return result.affectedRows > 0;
 }
 
 export type AppendMessageInput = {
@@ -291,6 +359,8 @@ export async function appendMessage(
           errorText: input.errorText ?? null,
           promptTokens: input.promptTokens ?? null,
           completionTokens: input.completionTokens ?? null,
+          runId: null,
+          baseLen: 0,
           createdAt: now.toISOString(),
         } satisfies MessageDto;
       });
@@ -373,12 +443,14 @@ export async function createRunRow(input: {
   userId: string;
   sessionId: string;
   messageId: string;
+  /** run 开始时消息已有多少字（续写才有值），前端续传时要靠它留住前缀 */
+  baseLen?: number;
 }): Promise<void> {
   const now = new Date();
   await execute(
-    `INSERT INTO runs (id, user_id, session_id, message_id, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?)`,
-    [input.id, input.userId, input.sessionId, input.messageId, now, now],
+    `INSERT INTO runs (id, user_id, session_id, message_id, base_len, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'running', ?, ?)`,
+    [input.id, input.userId, input.sessionId, input.messageId, input.baseLen ?? 0, now, now],
   );
 }
 

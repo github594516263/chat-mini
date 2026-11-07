@@ -18,6 +18,8 @@ export type ChatUIMessage = {
   runId?: string;
   /** 已经消费到的事件 seq：和 content 一起落盘，续传时作为 afterSeq */
   appliedSeq?: number;
+  /** 这条 run 开始时消息已有多少字（续写才有）：content 的前 baseLen 个字符是旧内容 */
+  baseLen?: number;
 };
 
 export type ChatSession = {
@@ -26,6 +28,8 @@ export type ChatSession = {
   createdAt: number;
   updatedAt: number;
   messages: ChatUIMessage[];
+  /** false = 服务端会话的消息还没拉下来（guest 会话恒为 true） */
+  loaded?: boolean;
 };
 
 export type ChatStore = {

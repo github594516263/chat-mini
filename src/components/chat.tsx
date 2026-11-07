@@ -52,6 +52,8 @@ export default function Chat({
     activeSession,
     messages,
     streaming,
+    hydrated,
+    messagesLoading,
     send,
     stop,
     regenerate,
@@ -61,7 +63,7 @@ export default function Chat({
     selectSession,
     deleteSession,
     renameSession,
-  } = useChat();
+  } = useChat({ user: initialUser });
 
   const { mode: themeMode, setTheme } = useTheme();
 
@@ -92,16 +94,11 @@ export default function Chat({
     setDraft("");
   }, [activeId]);
 
-  // 生成中刷新/关页面会中断，浏览器拦一下（内容不会丢，但生成会停）
-  useEffect(() => {
-    if (!streaming) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [streaming]);
+  // 这里原本挂了一个 beforeunload 拦截（生成中刷新就弹"更改可能未保存"）。
+  // 后来两种模式都能续传了，这个拦截就变成纯粹的骚扰：
+  //   登录用户：生成跑在服务端，刷新回来接着看，一个字都不丢
+  //   游客：    runId + 已消费的水位存在 localStorage，刷新后从断点接上
+  // 所以删掉，别拦用户刷新。
 
   function submit() {
     if (streaming || !input.trim()) return;
@@ -121,6 +118,7 @@ export default function Chat({
           onDelete={deleteSession}
           onRename={renameSession}
           live={live}
+          storage={initialUser ? "server" : "local"}
         />
       </div>
 
@@ -140,6 +138,7 @@ export default function Chat({
             onDelete={deleteSession}
             onRename={renameSession}
             live={live}
+            storage={initialUser ? "server" : "local"}
           />
           <button
             type="button"
@@ -179,7 +178,11 @@ export default function Chat({
         </header>
 
         <main className="min-h-0 flex-1 overflow-y-auto">
-          {messages.length === 0 ? (
+          {!hydrated || (messagesLoading && messages.length === 0) ? (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              正在加载会话…
+            </div>
+          ) : messages.length === 0 ? (
             <Hero
               onPick={(text) => {
                 setInput(text);
@@ -189,9 +192,10 @@ export default function Chat({
           ) : (
             <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
               {messages.map((message) => (
-                <Bubble
-                  key={message.id}
-                  message={message}
+                // data-role 是给端到端测试用的锚点：按角色定位气泡，不依赖样式
+                <div key={message.id} data-role={message.role}>
+                  <Bubble
+                    message={message}
                   streaming={streaming}
                   editing={editingId === message.id}
                   draft={draft}
@@ -211,7 +215,8 @@ export default function Chat({
                   }}
                   onRegenerate={(id) => void regenerate(id)}
                   onContinue={(id) => void continueGeneration(id)}
-                />
+                  />
+                </div>
               ))}
               <div ref={bottomRef} className="h-px" />
             </div>

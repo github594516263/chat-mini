@@ -16,24 +16,98 @@ import {
 
 export type { ChatSession, ChatUIMessage };
 
-/** 续写用的隐藏指令：不展示在界面里，只发给模型 */
+export type ChatUser = { id: string; username: string };
+
+/** 续写用的隐藏指令（游客模式才由前端拼；登录模式这条在服务端拼，前端不显示） */
 const CONTINUE_PROMPT =
   "（上一条回答因为刷新或断网中断了。请紧接着断掉的地方继续写下去，不要重复已经输出过的内容，也不要重新开头。）";
 
 type RunHandle = { runId: string; sessionId: string; assistantId: string };
 
+// ---------------------------------------------------------------- 服务端 DTO
+
+type ApiMessage = {
+  id: string;
+  seq: number;
+  role: "user" | "assistant" | "system";
+  content: string;
+  thinking: string | null;
+  status: "streaming" | "complete" | "interrupted" | "stopped" | "error";
+  errorText: string | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  runId: string | null;
+  baseLen: number;
+  createdAt: string;
+};
+
+type ApiSession = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
+function toUiMessage(m: ApiMessage): ChatUIMessage {
+  return {
+    id: m.id,
+    role: m.role === "user" ? "user" : "assistant",
+    content: m.content,
+    thinking: m.thinking ?? undefined,
+    usage:
+      m.promptTokens !== null || m.completionTokens !== null
+        ? { prompt_tokens: m.promptTokens ?? 0, completion_tokens: m.completionTokens ?? 0 }
+        : undefined,
+    pending: m.status === "streaming",
+    interrupted: m.status === "interrupted",
+    stopped: m.status === "stopped",
+    error: m.errorText ?? undefined,
+    runId: m.runId ?? undefined,
+    appliedSeq: 0,
+    baseLen: m.baseLen,
+  };
+}
+
+function toUiSession(s: ApiSession, messages: ChatUIMessage[] = [], loaded = false): ChatSession {
+  return {
+    id: s.id,
+    title: s.title,
+    createdAt: Date.parse(s.createdAt) || Date.now(),
+    updatedAt: Date.parse(s.updatedAt) || Date.now(),
+    messages,
+    loaded,
+  };
+}
+
+/** 登录模式下只记"上次看的是哪个会话"，消息本体永远以服务端为准 */
+const activeKey = (userId: string) => `chat-mini/active/v1/${userId}`;
+
+async function readJsonResponse(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * 会话 + 生成的唯一状态源。
  *
- * 生成模型（方案 B）：POST /api/chat 建 run → 生成跑在服务端 → 客户端用
- * runId + appliedSeq 订阅 /api/chat/stream。刷新只影响"订阅"，不影响"生成"，
- * 回来带上水位就能续传。appliedSeq 和正文写在同一条消息里，落盘天然原子。
+ * 两种模式共用同一套生成引擎（run + seq 续传），只换"数据从哪来"：
+ *   游客   localStorage 就是真相（不登录也能用，但换设备就没了）
+ *   登录   服务端是真相，本地只是缓存；刷新后从 /api/sessions 重新拉
  */
-export function useChat() {
+export function useChat(options: { user?: ChatUser | null } = {}) {
+  const userId = options.user?.id ?? null;
+  const remote = Boolean(userId);
+
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [hydrated, setHydrated] = useState(false);
+  const [messagesLoading, setMessagesLoading] = useState(false);
 
   /** 当前订阅的 AbortController（只掐订阅，不掐生成） */
   const abortRef = useRef<AbortController | null>(null);
@@ -50,24 +124,77 @@ export function useChat() {
     stateRef.current = { sessions, activeId };
   }, [sessions, activeId]);
 
-  // 首帧之后才读 localStorage，避免 SSR / 水合不一致
-  useEffect(() => {
-    const store = loadStore();
-    if (store.sessions.length > 0) {
-      setSessions(store.sessions);
-      setActiveId(store.activeId ?? store.sessions[0].id);
-    } else {
-      const session = createSession();
-      setSessions([session]);
-      setActiveId(session.id);
-    }
-    setHydrated(true);
-  }, []);
+  // ---------------------------------------------------------------- 水合
 
+  // 首帧之后才读存储，避免 SSR / 水合不一致
   useEffect(() => {
-    if (!hydrated) return;
+    if (!remote) {
+      const store = loadStore();
+      if (store.sessions.length > 0) {
+        setSessions(store.sessions);
+        setActiveId(store.activeId ?? store.sessions[0].id);
+      } else {
+        const session = createSession();
+        setSessions([session]);
+        setActiveId(session.id);
+      }
+      setHydrated(true);
+      return;
+    }
+
+    // 登录模式：列表来自服务端
+    if (!userId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/sessions");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = (await readJsonResponse(response)) as { sessions?: ApiSession[] };
+        let list = (data.sessions ?? []).map((s) => toUiSession(s));
+
+        if (list.length === 0) {
+          const created = await fetch("/api/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          if (created.ok) {
+            const payload = (await readJsonResponse(created)) as { session?: ApiSession };
+            if (payload.session) list = [toUiSession(payload.session)];
+          }
+        }
+        if (cancelled) return;
+
+        setSessions(list);
+        const saved = window.localStorage.getItem(activeKey(userId));
+        setActiveId(list.some((s) => s.id === saved) ? saved : (list[0]?.id ?? null));
+      } catch {
+        // 服务端不可用：保持空列表，界面上会显示没有会话
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [remote, userId]);
+
+  // 游客：整存整取落 localStorage
+  useEffect(() => {
+    if (remote || !hydrated) return;
     saveStore({ sessions, activeId });
-  }, [sessions, activeId, hydrated]);
+  }, [sessions, activeId, hydrated, remote]);
+
+  // 登录：只记当前会话 id
+  useEffect(() => {
+    if (!remote || !userId || !hydrated || !activeId) return;
+    try {
+      window.localStorage.setItem(activeKey(userId), activeId);
+    } catch {
+      // 隐私模式写不进去也没关系
+    }
+  }, [remote, userId, hydrated, activeId]);
 
   const active = useMemo(() => sessions.find((s) => s.id === activeId) ?? null, [sessions, activeId]);
   const ordered = useMemo(() => sortSessions(sessions), [sessions]);
@@ -113,13 +240,21 @@ export function useChat() {
       patchMessage(sessionId, messageId, (m) => {
         switch (event.type) {
           case "delta":
-            return { ...m, content: m.content + event.delta, appliedSeq: event.seq, interrupted: false };
+            return {
+              ...m,
+              content: m.content + event.delta,
+              appliedSeq: event.seq,
+              interrupted: false,
+            };
           case "think_delta":
             return { ...m, thinking: (m.thinking ?? "") + event.delta, appliedSeq: event.seq };
           case "usage":
             return {
               ...m,
-              usage: { prompt_tokens: event.prompt_tokens, completion_tokens: event.completion_tokens },
+              usage: {
+                prompt_tokens: event.prompt_tokens,
+                completion_tokens: event.completion_tokens,
+              },
               appliedSeq: event.seq,
             };
           case "sync":
@@ -205,8 +340,74 @@ export function useChat() {
     [applyEvent, markInterrupted],
   );
 
-  /** 建 run + 订阅。历史由调用方算好，send/regenerate/editAndResend/继续 共用 */
-  const startRun = useCallback(
+  /** 登录模式：拉一遍服务端消息，覆盖本地缓存（生成结束后用它对齐权威内容） */
+  const refreshMessages = useCallback(
+    async (sessionId: string): Promise<ChatUIMessage[] | null> => {
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}/messages`);
+        if (!response.ok) return null;
+        const data = (await readJsonResponse(response)) as { messages?: ApiMessage[] };
+        const messages = (data.messages ?? [])
+          .filter((m) => m.role !== "system")
+          .map(toUiMessage);
+        updateSession(sessionId, (s) => ({ ...s, messages, loaded: true }));
+        return messages;
+      } catch {
+        return null;
+      }
+    },
+    [updateSession],
+  );
+
+  /** 登录模式：订阅一个刚建好的 run，结束后用服务端内容对齐 */
+  const runRemote = useCallback(
+    async (sessionId: string, assistantId: string, runId: string, startFrom = 0) => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      stoppedByUserRef.current = false;
+      setStreaming(true);
+      runRef.current = { runId, sessionId, assistantId };
+
+      try {
+        await consumeRun(sessionId, assistantId, runId, startFrom, controller.signal);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          const message = error instanceof Error ? error.message : String(error);
+          patchMessage(sessionId, assistantId, (m) => ({ ...m, error: message, pending: false }));
+        }
+      } finally {
+        abortRef.current = null;
+        runRef.current = null;
+        setStreaming(false);
+        // 以服务端为准：定稿的正文、用量、状态都在库里
+        const messages = await refreshMessages(sessionId);
+        const finalMessage = messages?.find((m) => m.id === assistantId);
+        if (finalMessage && finalMessage.pending) markInterrupted(sessionId, assistantId);
+        // 列表里的标题/更新时间也顺手对齐
+        void fetch("/api/sessions")
+          .then((r) => (r.ok ? readJsonResponse(r) : null))
+          .then((data) => {
+            const list = (data as { sessions?: ApiSession[] } | null)?.sessions;
+            if (!list) return;
+            setSessions((prev) =>
+              prev.map((s) => {
+                const fresh = list.find((x) => x.id === s.id);
+                return fresh
+                  ? { ...s, title: fresh.title, updatedAt: Date.parse(fresh.updatedAt) || s.updatedAt }
+                  : s;
+              }),
+            );
+          })
+          .catch(() => {
+            // 列表刷新失败不影响正文
+          });
+      }
+    },
+    [consumeRun, markInterrupted, patchMessage, refreshMessages],
+  );
+
+  /** 游客模式的建 run + 订阅。历史由调用方算好 */
+  const startGuestRun = useCallback(
     async (sessionId: string, assistantId: string, history: ChatUIMessage[]) => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -266,6 +467,75 @@ export function useChat() {
     [consumeRun, patchMessage, updateSession],
   );
 
+  /** 登录模式：向服务端发起一个生成操作，拿回服务端分配的消息 id 再订阅 */
+  const startRemoteOperation = useCallback(
+    async (
+      sessionId: string,
+      body: { kind: "send"; content: string } | { kind: "regenerate" | "continue" | "edit"; messageId: string; content?: string },
+      options: { truncateFrom?: string; dropMessagesAlso?: boolean } = {},
+    ) => {
+      if (abortRef.current) return;
+      setStreaming(true);
+      stoppedByUserRef.current = false;
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, ...body }),
+        });
+        const data = (await readJsonResponse(response)) as {
+          runId?: string;
+          session?: ApiSession;
+          userMessage?: ApiMessage | null;
+          assistantMessage?: ApiMessage;
+          error?: string;
+          hint?: string;
+        };
+
+        if (!response.ok || !data.runId || !data.assistantMessage) {
+          const detail = data.error ?? `HTTP ${response.status}`;
+          throw new Error(data.hint ? `${detail}（${data.hint}）` : detail);
+        }
+
+        const assistant = toUiMessage(data.assistantMessage);
+
+        // 本地对齐服务端：截断+替换，避免本地和服务端 seq 打架
+        updateSession(sessionId, (session) => {
+          let messages = session.messages;
+          if (options.truncateFrom) {
+            const index = messages.findIndex((m) => m.id === options.truncateFrom);
+            if (index >= 0) messages = messages.slice(0, index);
+          }
+          const next = [...messages];
+          if (data.userMessage) next.push(toUiMessage(data.userMessage));
+          next.push({ ...assistant, content: "", pending: true, appliedSeq: 0 });
+          return {
+            ...session,
+            title: data.session?.title ?? session.title,
+            updatedAt: Date.parse(data.session?.updatedAt ?? "") || Date.now(),
+            messages: next,
+            loaded: true,
+          };
+        });
+
+        await runRemote(sessionId, assistant.id, data.runId, 0);
+      } catch (error) {
+        setStreaming(false);
+        const message = error instanceof Error ? error.message : String(error);
+        // 失败时留一条可见的错误消息，别让用户对着空气等
+        updateSession(sessionId, (session) => ({
+          ...session,
+          messages: [
+            ...session.messages,
+            { id: newId(), role: "assistant", content: "", error: message },
+          ],
+        }));
+      }
+    },
+    [runRemote, updateSession],
+  );
+
   /** 取当前会话 + 某条消息的下标 */
   const locate = useCallback((messageId: string) => {
     const { sessions: currentSessions, activeId: currentActiveId } = stateRef.current;
@@ -285,6 +555,11 @@ export function useChat() {
       const session = currentSessions.find((s) => s.id === currentActiveId);
       if (!session) return;
 
+      if (remote) {
+        await startRemoteOperation(session.id, { kind: "send", content });
+        return;
+      }
+
       const sessionId = session.id;
       const userMessage: ChatUIMessage = { id: newId(), role: "user", content };
       const assistantId = newId();
@@ -297,9 +572,9 @@ export function useChat() {
         messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
       }));
 
-      await startRun(sessionId, assistantId, history);
+      await startGuestRun(sessionId, assistantId, history);
     },
-    [startRun, updateSession],
+    [remote, startGuestRun, startRemoteOperation, updateSession],
   );
 
   /** 重新生成：丢掉这条助手消息，用它前面最近的那条用户消息重发 */
@@ -308,6 +583,14 @@ export function useChat() {
       if (abortRef.current) return;
       const located = locate(assistantMessageId);
       if (!located) return;
+
+      if (remote) {
+        await startRemoteOperation(located.session.id, {
+          kind: "regenerate",
+          messageId: assistantMessageId,
+        }, { truncateFrom: assistantMessageId });
+        return;
+      }
 
       const { session, index } = located;
       let userIndex = index - 1;
@@ -322,9 +605,9 @@ export function useChat() {
         messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
       }));
 
-      await startRun(session.id, assistantId, history);
+      await startGuestRun(session.id, assistantId, history);
     },
-    [locate, startRun, updateSession],
+    [locate, remote, startGuestRun, startRemoteOperation, updateSession],
   );
 
   /** 编辑重发：改掉那条用户消息，把它之后的全部内容丢弃后重发 */
@@ -334,6 +617,15 @@ export function useChat() {
       if (!content || abortRef.current) return;
       const located = locate(userMessageId);
       if (!located) return;
+
+      if (remote) {
+        await startRemoteOperation(
+          located.session.id,
+          { kind: "edit", messageId: userMessageId, content },
+          { truncateFrom: userMessageId },
+        );
+        return;
+      }
 
       const { session, index } = located;
       const edited: ChatUIMessage = { ...session.messages[index], content };
@@ -347,9 +639,9 @@ export function useChat() {
         messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
       }));
 
-      await startRun(session.id, assistantId, history);
+      await startGuestRun(session.id, assistantId, history);
     },
-    [locate, startRun, updateSession],
+    [locate, remote, startGuestRun, startRemoteOperation, updateSession],
   );
 
   /**
@@ -366,6 +658,23 @@ export function useChat() {
       const target = session.messages[index];
       if (target.role !== "assistant" || !target.content.trim()) return;
 
+      if (remote) {
+        patchMessage(session.id, assistantMessageId, (m) => ({
+          ...m,
+          interrupted: false,
+          stopped: false,
+          error: undefined,
+          pending: true,
+          appliedSeq: 0,
+          baseLen: m.content.length,
+        }));
+        await startRemoteOperation(session.id, {
+          kind: "continue",
+          messageId: assistantMessageId,
+        });
+        return;
+      }
+
       const history: ChatUIMessage[] = [
         ...session.messages.slice(0, index + 1),
         { id: newId(), role: "user", content: CONTINUE_PROMPT },
@@ -380,9 +689,9 @@ export function useChat() {
       }));
       updateSession(session.id, (s) => ({ ...s, updatedAt: Date.now() }));
 
-      await startRun(session.id, assistantMessageId, history);
+      await startGuestRun(session.id, assistantMessageId, history);
     },
-    [locate, patchMessage, startRun, updateSession],
+    [locate, patchMessage, remote, startGuestRun, startRemoteOperation, updateSession],
   );
 
   /** 停止：先让服务端真的停（否则 token 继续烧），再掐掉本地订阅 */
@@ -401,39 +710,85 @@ export function useChat() {
     abortRef.current?.abort();
   }, []);
 
-  // 刷新/重新进入后：如果还有跑着的 run，带着水位自动续上
+  // ---------------------------------------------------------------- 续传
+
+  /** 把一条 status=streaming 的消息接上：前缀 + 重新回放这条 run 的增量 */
+  const resumeRun = useCallback(
+    (sessionId: string, message: ChatUIMessage) => {
+      if (!message.runId || abortRef.current) return;
+      if (resumedRef.current.has(message.runId)) return;
+      resumedRef.current.add(message.runId);
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      stoppedByUserRef.current = false;
+      setStreaming(true);
+
+      // 两种模式的重放起点不一样：
+      //   服务端：库里存的是"前缀 + 已输出"，而 run 的事件里只有本次输出。
+      //           所以先砍回前缀（baseLen 个字），再从 seq 0 重放，正文不会重复。
+      //   游客：  正文只存在本地，水位 appliedSeq 也是本地记的，直接用那个水位接着放。
+      const fromSeq = remote ? 0 : (message.appliedSeq ?? 0);
+      patchMessage(sessionId, message.id, (m) => ({
+        ...m,
+        content: remote ? m.content.slice(0, m.baseLen ?? 0) : m.content,
+        appliedSeq: fromSeq,
+        pending: true,
+        interrupted: false,
+      }));
+
+      void (async () => {
+        try {
+          await consumeRun(sessionId, message.id, message.runId!, fromSeq, controller.signal);
+        } catch {
+          markInterrupted(sessionId, message.id);
+        } finally {
+          abortRef.current = null;
+          setStreaming(false);
+          if (remote) {
+            const messages = await refreshMessages(sessionId);
+            const finalMessage = messages?.find((m) => m.id === message.id);
+            if (finalMessage && finalMessage.pending) markInterrupted(sessionId, message.id);
+          } else {
+            patchMessage(sessionId, message.id, (m) =>
+              m.pending ? { ...m, pending: false, interrupted: !m.error } : m,
+            );
+          }
+        }
+      })();
+    },
+    [consumeRun, markInterrupted, patchMessage, refreshMessages, remote],
+  );
+
+  // 游客：从本地仓里找没跑完的 run 续上（数据本来就在本地）
   useEffect(() => {
-    if (!hydrated || !active) return;
+    if (remote || !hydrated || !active) return;
     if (abortRef.current) return;
-
     const target = [...active.messages].reverse().find((m) => m.pending && m.runId);
-    if (!target?.runId) return;
-    if (resumedRef.current.has(target.runId)) return;
-    resumedRef.current.add(target.runId);
+    if (target) resumeRun(active.id, target);
+  }, [active, hydrated, remote, resumeRun]);
 
-    const sessionId = active.id;
-    const messageId = target.id;
-    const runId = target.runId;
-    const fromSeq = target.appliedSeq ?? 0;
-    const controller = new AbortController();
-    abortRef.current = controller;
-    stoppedByUserRef.current = false;
-    setStreaming(true);
-
-    void (async () => {
+  // 登录：切到哪个会话就拉哪份消息；拉到正在生成的消息就接上
+  const loadMessages = useCallback(
+    async (sessionId: string) => {
+      setMessagesLoading(true);
       try {
-        await consumeRun(sessionId, messageId, runId, fromSeq, controller.signal);
-      } catch {
-        markInterrupted(sessionId, messageId);
+        const messages = await refreshMessages(sessionId);
+        if (!messages) return;
+        const streamingMessage = [...messages].reverse().find((m) => m.pending && m.runId);
+        if (streamingMessage) resumeRun(sessionId, streamingMessage);
       } finally {
-        abortRef.current = null;
-        setStreaming(false);
-        patchMessage(sessionId, messageId, (m) =>
-          m.pending ? { ...m, pending: false, interrupted: !m.error } : m,
-        );
+        setMessagesLoading(false);
       }
-    })();
-  }, [active, consumeRun, hydrated, markInterrupted, patchMessage]);
+    },
+    [refreshMessages, resumeRun],
+  );
+
+  useEffect(() => {
+    if (!remote || !hydrated || !active) return;
+    if (active.loaded !== false) return;
+    void loadMessages(active.id);
+  }, [active, hydrated, loadMessages, remote]);
 
   const selectSession = useCallback((sessionId: string) => {
     // 只断订阅，不掐生成：切回来还能接着续
@@ -443,40 +798,106 @@ export function useChat() {
 
   const newSession = useCallback(() => {
     abortRef.current?.abort();
+
+    if (remote) {
+      const tempId = newId();
+      const now = Date.now();
+      const draft: ChatSession = {
+        id: tempId,
+        title: "新对话",
+        createdAt: now,
+        updatedAt: now,
+        messages: [],
+        loaded: true,
+      };
+      setSessions((prev) => [draft, ...prev]);
+      setActiveId(tempId);
+
+      void (async () => {
+        try {
+          const response = await fetch("/api/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = (await readJsonResponse(response)) as { session?: ApiSession };
+          if (!data.session) throw new Error("服务端没有返回会话");
+          const real = toUiSession(data.session, [], true);
+          // 把临时 id 换成服务端 id
+          setSessions((prev) => prev.map((s) => (s.id === tempId ? real : s)));
+          setActiveId((current) => (current === tempId ? real.id : current));
+        } catch {
+          setSessions((prev) => prev.filter((s) => s.id !== tempId));
+          setActiveId((current) => (current === tempId ? (stateRef.current.sessions[0]?.id ?? null) : current));
+        }
+      })();
+
+      return tempId;
+    }
+
     const session = createSession();
     setSessions((prev) => [session, ...prev]);
     setActiveId(session.id);
     return session.id;
-  }, []);
+  }, [remote]);
 
-  const deleteSession = useCallback((sessionId: string) => {
-    abortRef.current?.abort();
-    setSessions((prev) => {
-      const remaining = prev.filter((s) => s.id !== sessionId);
-      if (remaining.length === 0) {
-        const session = createSession();
-        setActiveId(session.id);
-        return [session];
+  const deleteSession = useCallback(
+    (sessionId: string) => {
+      abortRef.current?.abort();
+
+      if (remote) {
+        setSessions((prev) => {
+          const remaining = prev.filter((s) => s.id !== sessionId);
+          if (sessionId === stateRef.current.activeId) {
+            setActiveId(remaining.length > 0 ? sortSessions(remaining)[0].id : null);
+          }
+          return remaining;
+        });
+        void fetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {
+          // 删失败就以服务端为准，重新拉一次
+        });
+        if (stateRef.current.sessions.length <= 1) newSession();
+        return;
       }
-      if (sessionId === stateRef.current.activeId) {
-        const next = sortSessions(remaining)[0];
-        setActiveId(next.id);
-      }
-      return remaining;
-    });
-  }, []);
+
+      setSessions((prev) => {
+        const remaining = prev.filter((s) => s.id !== sessionId);
+        if (remaining.length === 0) {
+          const session = createSession();
+          setActiveId(session.id);
+          return [session];
+        }
+        if (sessionId === stateRef.current.activeId) {
+          const next = sortSessions(remaining)[0];
+          setActiveId(next.id);
+        }
+        return remaining;
+      });
+    },
+    [newSession, remote],
+  );
 
   /** 重命名：不改 updatedAt，避免仅仅改个名字就把会话顶到列表最前 */
   const renameSession = useCallback(
     (sessionId: string, title: string) => {
       const next = title.replace(/\s+/g, " ").trim();
       if (!next) return;
-      updateSession(sessionId, (s) => ({
-        ...s,
-        title: next.length > 40 ? `${next.slice(0, 40)}…` : next,
-      }));
+      const capped = next.length > 40 ? `${next.slice(0, 40)}…` : next;
+
+      updateSession(sessionId, (s) => ({ ...s, title: capped }));
+
+      if (remote) {
+        void fetch(`/api/sessions/${sessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: capped }),
+        }).catch(() => {
+          // 改名失败不回滚：下次刷新会以服务端为准
+        });
+      }
     },
-    [updateSession],
+    [remote, updateSession],
   );
 
   return {
@@ -486,6 +907,7 @@ export function useChat() {
     messages: active?.messages ?? [],
     streaming,
     hydrated,
+    messagesLoading,
     send,
     stop,
     regenerate,

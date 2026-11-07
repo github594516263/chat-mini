@@ -14,6 +14,8 @@ type SidebarProps = {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   live: boolean;
+  /** 数据存哪：游客=浏览器本地，登录=服务端 MySQL */
+  storage?: "local" | "server";
 };
 
 export function Sidebar({
@@ -24,6 +26,7 @@ export function Sidebar({
   onDelete,
   onRename,
   live,
+  storage = "local",
 }: SidebarProps) {
   const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -196,7 +199,8 @@ export function Sidebar({
       </div>
 
       <div className="border-t border-border px-3.5 py-2.5 text-[11px] text-muted-foreground">
-        {query ? `${filtered.length} / ${sessions.length}` : sessions.length} 个会话 · 存在浏览器本地
+        {query ? `${filtered.length} / ${sessions.length}` : sessions.length} 个会话 ·{" "}
+        {storage === "server" ? "已同步到服务端" : "存在浏览器本地"}
       </div>
     </aside>
   );

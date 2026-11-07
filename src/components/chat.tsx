@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Copy, PanelLeft, Pencil, RotateCcw, Square } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
 
 import { AppShell, useAppShell } from "@/components/app-shell";
 import { ThemeMenu } from "@/components/theme-menu";
 import type { AccountUser } from "@/lib/account";
-import { useChat, type ChatUIMessage } from "@/lib/use-chat";
+import { useChat, type ChatUIMessage, type InitialSession } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
 const PLUGINS = { code };
@@ -47,11 +48,31 @@ type ChatController = ReturnType<typeof useChat>;
 export default function Chat({
   live,
   initialUser,
+  initialSessionId = null,
+  initialSession = null,
 }: {
   live: boolean;
   initialUser: AccountUser | null;
+  /** URL 里的会话 id（/c/[id]）；根路径为 null */
+  initialSessionId?: string | null;
+  /** 服务端已确认存在的会话（登录模式才有），让首屏直接有标题 */
+  initialSession?: InitialSession | null;
 }) {
-  const chat = useChat({ user: initialUser });
+  const chat = useChat({ user: initialUser, initialSessionId, initialSession });
+  const router = useRouter();
+
+  /**
+   * Step 1：侧栏切换同时做两件事 —— 更新会话状态（现状不动）+ 把地址栏同步到 /c/[id]。
+   * Step 2/3 会把 activeId 的所有权交给 URL，那时这里只剩 router.push。
+   */
+  const selectSession = useCallback(
+    (sessionId: string) => {
+      chat.selectSession(sessionId);
+      const target = `/c/${sessionId}`;
+      if (window.location.pathname !== target) router.push(target);
+    },
+    [chat, router],
+  );
 
   return (
     <AppShell
@@ -60,7 +81,8 @@ export default function Chat({
       storage={initialUser ? "server" : "local"}
       sessions={chat.sessions}
       activeId={chat.activeId}
-      onSelect={chat.selectSession}
+      onSelect={selectSession}
+      // TODO(Step 3)：新建对话建出真实 id 后应 router.replace(`/c/${id}`)，现在 URL 会短暂停在旧会话
       onNew={chat.newSession}
       onDelete={chat.deleteSession}
       onRename={chat.renameSession}

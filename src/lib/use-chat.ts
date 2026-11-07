@@ -83,6 +83,15 @@ function toUiSession(s: ApiSession, messages: ChatUIMessage[] = [], loaded = fal
 /** 登录模式下只记"上次看的是哪个会话"，消息本体永远以服务端为准 */
 const activeKey = (userId: string) => `chat-mini/active/v1/${userId}`;
 
+/** 服务端在 /c/[id] 已经确认过的会话：用来让首屏直接有标题，并兜住"不在列表前 50 条"的老会话 */
+export type InitialSession = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
 async function readJsonResponse(response: Response): Promise<Record<string, unknown>> {
   const text = await response.text();
   try {
@@ -99,9 +108,19 @@ async function readJsonResponse(response: Response): Promise<Record<string, unkn
  *   游客   localStorage 就是真相（不登录也能用，但换设备就没了）
  *   登录   服务端是真相，本地只是缓存；刷新后从 /api/sessions 重新拉
  */
-export function useChat(options: { user?: ChatUser | null } = {}) {
+export function useChat(
+  options: {
+    user?: ChatUser | null;
+    /** URL 里的会话 id（/c/[id]）；它比 localStorage 的"上次看的"优先级更高 */
+    initialSessionId?: string | null;
+    /** 服务端确认存在的那条会话（登录模式才有） */
+    initialSession?: InitialSession | null;
+  } = {},
+) {
   const userId = options.user?.id ?? null;
   const remote = Boolean(userId);
+  const initialSessionId = options.initialSessionId ?? null;
+  const initialSession = options.initialSession ?? null;
 
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -130,9 +149,15 @@ export function useChat(options: { user?: ChatUser | null } = {}) {
   useEffect(() => {
     if (!remote) {
       const store = loadStore();
+      // 优先级：URL 里的 id > 上次看的 > 第一条（Step 1：先让 /c/[id] 能直开）
+      const fromUrl =
+        initialSessionId && store.sessions.some((s) => s.id === initialSessionId)
+          ? initialSessionId
+          : null;
+
       if (store.sessions.length > 0) {
         setSessions(store.sessions);
-        setActiveId(store.activeId ?? store.sessions[0].id);
+        setActiveId(fromUrl ?? store.activeId ?? store.sessions[0].id);
       } else {
         const session = createSession();
         setSessions([session]);
@@ -152,6 +177,12 @@ export function useChat(options: { user?: ChatUser | null } = {}) {
         const data = (await readJsonResponse(response)) as { sessions?: ApiSession[] };
         let list = (data.sessions ?? []).map((s) => toUiSession(s));
 
+        // 老会话可能落在列表前 50 条之外：服务端既然确认它存在，就补进来，
+        // 避免出现"URL 里有 id、侧栏里却没有这条会话"的割裂状态。
+        if (initialSession && !list.some((s) => s.id === initialSession.id)) {
+          list = [toUiSession(initialSession), ...list];
+        }
+
         if (list.length === 0) {
           const created = await fetch("/api/sessions", {
             method: "POST",
@@ -166,8 +197,13 @@ export function useChat(options: { user?: ChatUser | null } = {}) {
         if (cancelled) return;
 
         setSessions(list);
+        // 优先级：URL 里的 id（服务端已确认存在）> localStorage 的"上次看的" > 第一条
+        const fromUrl =
+          initialSessionId && list.some((s) => s.id === initialSessionId) ? initialSessionId : null;
         const saved = window.localStorage.getItem(activeKey(userId));
-        setActiveId(list.some((s) => s.id === saved) ? saved : (list[0]?.id ?? null));
+        setActiveId(
+          fromUrl ?? (list.some((s) => s.id === saved) ? saved : null) ?? (list[0]?.id ?? null),
+        );
       } catch {
         // 服务端不可用：保持空列表，界面上会显示没有会话
       } finally {
@@ -178,7 +214,7 @@ export function useChat(options: { user?: ChatUser | null } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [remote, userId]);
+  }, [remote, userId, initialSessionId, initialSession]);
 
   // 游客：整存整取落 localStorage
   useEffect(() => {

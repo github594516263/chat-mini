@@ -42,6 +42,7 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 - **消息动作**：复制、重新生成、编辑重发（改掉用户消息后从那里重新流，之后的回答会被丢弃）
 - 思维链单独折叠（配 `DEEPSEEK_MODEL=deepseek-reasoner` 就能看到真的）
 - Markdown 全支持：表格 / 代码高亮 / 引用 / 列表，代码块自带复制下载
+- **主题三态**：浅色 / 深色 / 跟随系统，记住了刷新不跳；首屏由内联脚本先定 class，不会闪白
 - token 用量显示（真实 usage，不是估算）
 
 ![消息动作条](docs/actions.png)
@@ -51,6 +52,10 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 | 搜索 | 重命名 |
 | --- | --- |
 | ![搜索](docs/sidebar-search.png) | ![重命名](docs/sidebar-rename.png) |
+
+深色主题（含 shiki 深色代码高亮）：
+
+![深色主题](docs/theme-dark.png)
 
 ## 文件地图
 
@@ -63,6 +68,9 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 | `src/lib/sessions.ts` | 会话存储层：读写 localStorage、标题派生、旧版单会话数据迁移 |
 | `src/lib/use-chat.ts` | 会话 + 流式的唯一状态源：切会话时 abort，事件回填绑定 sessionId；`regenerate` / `editAndResend` 复用同一个 `streamInto` |
 | `src/components/sidebar.tsx` | 会话列表：新建 / 切换 / 删除 / 搜索 / 重命名 / 自动标题 |
+| `src/lib/theme.ts` | 主题三态：读写偏好、解析 system、首屏内联脚本字符串 |
+| `src/lib/use-theme.ts` | 主题状态 hook：挂载读偏好、监听系统配色、只改 `<html class>` |
+| `src/components/theme-menu.tsx` | 右上角主题菜单（浅色 / 深色 / 跟随系统） |
 | `src/components/chat.tsx` | 界面：空态、消息流、动作条、编辑重发、输入框、移动端抽屉 |
 | `src/app/globals.css` | 设计令牌（shadcn 语义命名）+ Tailwind v4 配置 |
 | `src/app/preview/page.tsx` | 渲染自检页：固定 markdown，用来看 streamdown 样式对不对 |
@@ -85,6 +93,9 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
    所以 `globals.css` 里必须有 `@source "../../node_modules/streamdown/dist";`，否则 markdown 会静默掉一部分样式。
 2. **Next 16 dev 会校验静态资源来源**，用 `127.0.0.1` 打开时客户端 chunk 会 403（表现：样式在、高亮和交互不在）。
    `next.config.ts` 里的 `allowedDevOrigins: ["127.0.0.1", "localhost"]` 就是干这个的。
+3. **Tailwind v4 的 `dark:` 默认跟媒体查询走**。要做"手动切深色"就必须声明
+   `@custom-variant dark (&:where(.dark, .dark *));`，并把深色令牌从 `@media (prefers-color-scheme: dark)`
+   挪到 `.dark` 上——否则切了 class 也没人理，streamdown 的 `dark:` 样式同样不会生效。
 
 ## 自检脚本
 
@@ -100,6 +111,9 @@ node scripts/e2e-actions.mjs
 
 # 端到端（侧栏）：搜索 / 空结果 / 清空 / 重命名 / Esc 取消 / 刷新保持 / 顺序不变
 node scripts/e2e-sidebar.mjs
+
+# 端到端（主题）：首屏不闪白 / 三态切换 / 持久化 / 代码高亮跟随 / 手动压过系统
+node scripts/e2e-theme.mjs
 ```
 
 脚本都可配 `CDP_PORT` / `BASE_URL`，并且都要求先起一个带调试端口的 Chrome：
@@ -110,7 +124,7 @@ chrome --headless=new --remote-debugging-port=9223 --user-data-dir=/tmp/cdp abou
 
 ## 下一步可以加什么
 
-- 暗色手动切换（现在跟随系统）
-- 会话置顶 / 按标题或内容全文搜索（现在只按标题前缀式包含匹配）
+- 会话置顶 / 按标题或内容全文搜索（现在只按标题包含匹配）
 - 消息级"从这里分支"（现在是编辑即截断，多分支要另存会话）
 - 事件补全：`rag_search` / `file_proc` / `compact_done`（想复刻目标站的"流过程"体验时再加）
+- 多标签页同步（现在两个标签页各存各的，后写的覆盖先写的）

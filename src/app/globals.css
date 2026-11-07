@@ -2,6 +2,13 @@
 @import "streamdown/styles.css";
 
 /*
+ * 暗色策略：class 而不是媒体查询。
+ * 这样"跟随系统 / 浅色 / 深色"三态才能手动覆盖，而且 streamdown 内部的
+ * dark: 变体（如 dark:bg-[var(--shiki-dark-bg)]）也会被这条规则接管。
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
  * Tailwind v4 默认不扫描 node_modules，但 streamdown 的默认组件把样式写成
  * Tailwind 类名放在 dist 里（bg-sidebar / divide-border / rounded-md …）。
  * 不显式 @source 的话这些类不会被生成，markdown 会静默掉样式。
@@ -42,6 +49,7 @@
 }
 
 :root {
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #17181a;
   --card: #ffffff;
@@ -65,30 +73,33 @@
   --sidebar-border: #ececee;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #1b1b1d;
-    --foreground: #ececee;
-    --card: #232326;
-    --card-foreground: #ececee;
-    --popover: #232326;
-    --popover-foreground: #ececee;
-    --primary: #6b83ff;
-    --primary-foreground: #12121a;
-    --secondary: #2a2a2e;
-    --secondary-foreground: #ececee;
-    --muted: #262629;
-    --muted-foreground: #9a9ca2;
-    --accent: #2a2a2e;
-    --accent-foreground: #ececee;
-    --destructive: #ff6369;
-    --border: #313135;
-    --input: #313135;
-    --ring: #6b83ff;
-    --sidebar: #171719;
-    --sidebar-foreground: #a8aaaf;
-    --sidebar-border: #2a2a2e;
-  }
+/*
+ * 深色令牌挂在 .dark 上（由 <html class="dark"> 控制），不再跟随媒体查询。
+ * 三态切换（跟随系统/浅色/深色）由 src/lib/theme.ts 决定要不要加这个 class。
+ */
+.dark {
+  color-scheme: dark;
+  --background: #1b1b1d;
+  --foreground: #ececee;
+  --card: #232326;
+  --card-foreground: #ececee;
+  --popover: #232326;
+  --popover-foreground: #ececee;
+  --primary: #6b83ff;
+  --primary-foreground: #12121a;
+  --secondary: #2a2a2e;
+  --secondary-foreground: #ececee;
+  --muted: #262629;
+  --muted-foreground: #9a9ca2;
+  --accent: #2a2a2e;
+  --accent-foreground: #ececee;
+  --destructive: #ff6369;
+  --border: #313135;
+  --input: #313135;
+  --ring: #6b83ff;
+  --sidebar: #171719;
+  --sidebar-foreground: #a8aaaf;
+  --sidebar-border: #2a2a2e;
 }
 
 * {

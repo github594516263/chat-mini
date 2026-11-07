@@ -6,7 +6,9 @@ import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
 
 import { Sidebar } from "@/components/sidebar";
+import { ThemeMenu } from "@/components/theme-menu";
 import { useChat, type ChatUIMessage } from "@/lib/use-chat";
+import { useTheme } from "@/lib/use-theme";
 import { cn } from "@/lib/utils";
 
 const PLUGINS = { code };
@@ -52,6 +54,8 @@ export default function Chat({ live }: { live: boolean }) {
     deleteSession,
     renameSession,
   } = useChat();
+
+  const { mode: themeMode, setTheme } = useTheme();
 
   const [input, setInput] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -140,6 +144,7 @@ export default function Chat({ live }: { live: boolean }) {
           <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
             {activeSession?.title ?? "新对话"}
           </h1>
+          <ThemeMenu mode={themeMode} onSelect={setTheme} />
           <span className="hidden shrink-0 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground sm:inline">
             deepseek-chat
           </span>

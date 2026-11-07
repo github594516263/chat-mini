@@ -5,11 +5,10 @@ import { ArrowUp, Check, Copy, PanelLeft, Pencil, RotateCcw, Square } from "luci
 import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
 
-import { Sidebar } from "@/components/sidebar";
+import { AppShell, useAppShell } from "@/components/app-shell";
 import { ThemeMenu } from "@/components/theme-menu";
-import { AccountMenu, type AccountUser } from "@/components/account-menu";
+import type { AccountUser } from "@/lib/account";
 import { useChat, type ChatUIMessage } from "@/lib/use-chat";
-import { useTheme } from "@/lib/use-theme";
 import { cn } from "@/lib/utils";
 
 const PLUGINS = { code };
@@ -39,6 +38,12 @@ const SUGGESTIONS = [
 const ACTION_BTN =
   "flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
 
+type ChatController = ReturnType<typeof useChat>;
+
+/**
+ * 这里只做两件事：把会话状态交给壳（侧栏要显示会话列表），
+ * 再把内容部分交给 ChatView。壳上的状态（折叠、主题、设置）都在 AppShell 里。
+ */
 export default function Chat({
   live,
   initialUser,
@@ -46,8 +51,29 @@ export default function Chat({
   live: boolean;
   initialUser: AccountUser | null;
 }) {
+  const chat = useChat({ user: initialUser });
+
+  return (
+    <AppShell
+      user={initialUser}
+      live={live}
+      storage={initialUser ? "server" : "local"}
+      sessions={chat.sessions}
+      activeId={chat.activeId}
+      onSelect={chat.selectSession}
+      onNew={chat.newSession}
+      onDelete={chat.deleteSession}
+      onRename={chat.renameSession}
+    >
+      <ChatView chat={chat} live={live} />
+    </AppShell>
+  );
+}
+
+function ChatView({ chat, live }: { chat: ChatController; live: boolean }) {
+  const { openMobileSidebar, themeMode, setTheme } = useAppShell();
+
   const {
-    sessions,
     activeId,
     activeSession,
     messages,
@@ -59,16 +85,9 @@ export default function Chat({
     regenerate,
     editAndResend,
     continueGeneration,
-    newSession,
-    selectSession,
-    deleteSession,
-    renameSession,
-  } = useChat({ user: initialUser });
-
-  const { mode: themeMode, setTheme } = useTheme();
+  } = chat;
 
   const [input, setInput] = useState("");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
@@ -108,94 +127,52 @@ export default function Chat({
   }
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background">
-      <div className="hidden md:block">
-        <Sidebar
-          sessions={sessions}
-          activeId={activeId}
-          onSelect={selectSession}
-          onNew={newSession}
-          onDelete={deleteSession}
-          onRename={renameSession}
-          live={live}
-          storage={initialUser ? "server" : "local"}
-        />
-      </div>
+    <>
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3">
+        <button
+          type="button"
+          onClick={openMobileSidebar}
+          aria-label="打开侧栏"
+          className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:hidden"
+        >
+          <PanelLeft size={16} />
+        </button>
+        <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
+          {activeSession?.title ?? "新对话"}
+        </h1>
+        <ThemeMenu mode={themeMode} onSelect={setTheme} />
+        <span className="hidden shrink-0 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground sm:inline">
+          deepseek-chat
+        </span>
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium md:hidden",
+            live ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600",
+          )}
+        >
+          {live ? "live" : "mock"}
+        </span>
+      </header>
 
-      {sidebarOpen ? (
-        <div className="fixed inset-0 z-30 flex md:hidden">
-          <Sidebar
-            sessions={sessions}
-            activeId={activeId}
-            onSelect={(id) => {
-              selectSession(id);
-              setSidebarOpen(false);
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        {!hydrated || (messagesLoading && messages.length === 0) ? (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            正在加载会话…
+          </div>
+        ) : messages.length === 0 ? (
+          <Hero
+            onPick={(text) => {
+              setInput(text);
+              textareaRef.current?.focus();
             }}
-            onNew={() => {
-              newSession();
-              setSidebarOpen(false);
-            }}
-            onDelete={deleteSession}
-            onRename={renameSession}
-            live={live}
-            storage={initialUser ? "server" : "local"}
           />
-          <button
-            type="button"
-            aria-label="关闭侧栏"
-            onClick={() => setSidebarOpen(false)}
-            className="flex-1 bg-foreground/20 backdrop-blur-sm"
-          />
-        </div>
-      ) : null}
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3">
-          <button
-            type="button"
-            onClick={() => setSidebarOpen(true)}
-            aria-label="打开侧栏"
-            className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:hidden"
-          >
-            <PanelLeft size={16} />
-          </button>
-          <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
-            {activeSession?.title ?? "新对话"}
-          </h1>
-          <AccountMenu user={initialUser} />
-          <ThemeMenu mode={themeMode} onSelect={setTheme} />
-          <span className="hidden shrink-0 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground sm:inline">
-            deepseek-chat
-          </span>
-          <span
-            className={cn(
-              "shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium md:hidden",
-              live ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600",
-            )}
-          >
-            {live ? "live" : "mock"}
-          </span>
-        </header>
-
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          {!hydrated || (messagesLoading && messages.length === 0) ? (
-            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-              正在加载会话…
-            </div>
-          ) : messages.length === 0 ? (
-            <Hero
-              onPick={(text) => {
-                setInput(text);
-                textareaRef.current?.focus();
-              }}
-            />
-          ) : (
-            <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
-              {messages.map((message) => (
-                // data-role 是给端到端测试用的锚点：按角色定位气泡，不依赖样式
-                <div key={message.id} data-role={message.role}>
-                  <Bubble
-                    message={message}
+        ) : (
+          <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
+            {messages.map((message) => (
+              // data-role 是给端到端测试用的锚点：按角色定位气泡，不依赖样式
+              <div key={message.id} data-role={message.role}>
+                <Bubble
+                  message={message}
                   streaming={streaming}
                   editing={editingId === message.id}
                   draft={draft}
@@ -215,59 +192,58 @@ export default function Chat({
                   }}
                   onRegenerate={(id) => void regenerate(id)}
                   onContinue={(id) => void continueGeneration(id)}
-                  />
-                </div>
-              ))}
-              <div ref={bottomRef} className="h-px" />
-            </div>
-          )}
-        </main>
-
-        <div className="shrink-0 border-t border-border bg-background">
-          <div className="mx-auto w-full max-w-3xl px-4 py-3">
-            <div className="flex items-end gap-2 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    submit();
-                  }
-                }}
-                rows={1}
-                placeholder="给 chat-mini 发送消息…"
-                className="max-h-[200px] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
-              />
-              <button
-                type="button"
-                onClick={streaming ? stop : submit}
-                disabled={!streaming && !input.trim()}
-                aria-label={streaming ? "停止生成" : "发送"}
-                className={cn(
-                  "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
-                  streaming
-                    ? "bg-foreground text-background hover:opacity-90"
-                    : "bg-primary text-primary-foreground hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground",
-                )}
-              >
-                {streaming ? (
-                  <Square size={13} fill="currentColor" />
-                ) : (
-                  <ArrowUp size={16} strokeWidth={2.4} />
-                )}
-              </button>
-            </div>
-            <p className="mt-2 text-center text-[11px] text-muted-foreground">
-              内容由 AI 生成，请自行核对
-              <span className="hidden sm:inline"> · Enter 发送，Shift+Enter 换行</span>
-              <span className="hidden md:inline"> · 自研 NDJSON 事件协议</span>
-            </p>
+                />
+              </div>
+            ))}
+            <div ref={bottomRef} className="h-px" />
           </div>
+        )}
+      </main>
+
+      <div className="shrink-0 border-t border-border bg-background">
+        <div className="mx-auto w-full max-w-3xl px-4 py-3">
+          <div className="flex items-end gap-2 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              rows={1}
+              placeholder="给 chat-mini 发送消息…"
+              className="max-h-[200px] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
+            />
+            <button
+              type="button"
+              onClick={streaming ? stop : submit}
+              disabled={!streaming && !input.trim()}
+              aria-label={streaming ? "停止生成" : "发送"}
+              className={cn(
+                "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
+                streaming
+                  ? "bg-foreground text-background hover:opacity-90"
+                  : "bg-primary text-primary-foreground hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground",
+              )}
+            >
+              {streaming ? (
+                <Square size={13} fill="currentColor" />
+              ) : (
+                <ArrowUp size={16} strokeWidth={2.4} />
+              )}
+            </button>
+          </div>
+          <p className="mt-2 text-center text-[11px] text-muted-foreground">
+            内容由 AI 生成，请自行核对
+            <span className="hidden sm:inline"> · Enter 发送，Shift+Enter 换行</span>
+            <span className="hidden md:inline"> · 自研 NDJSON 事件协议</span>
+          </p>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 

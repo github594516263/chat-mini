@@ -1,15 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Copy, PanelLeft, Pencil, RotateCcw, Square } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
 
-import { AppShell, useAppShell } from "@/components/app-shell";
+import { useAppShell } from "@/components/app-shell";
 import { ThemeMenu } from "@/components/theme-menu";
-import type { AccountUser } from "@/lib/account";
-import { useChat, type ChatUIMessage, type InitialSession } from "@/lib/use-chat";
+import { useChatContext } from "@/components/chat-context";
+import type { ChatUIMessage } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
 const PLUGINS = { code };
@@ -39,61 +38,13 @@ const SUGGESTIONS = [
 const ACTION_BTN =
   "flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
 
-type ChatController = ReturnType<typeof useChat>;
-
 /**
- * 这里只做两件事：把会话状态交给壳（侧栏要显示会话列表），
- * 再把内容部分交给 ChatView。壳上的状态（折叠、主题、设置）都在 AppShell 里。
+ * 页面主体。会话状态全部来自 ChatContext（挂在 layout 上的 Provider），
+ * 所以这个组件可以随页面重建 —— 重建之后草稿和生成中的正文都还在。
  */
-export default function Chat({
-  live,
-  initialUser,
-  initialSessionId = null,
-  initialSession = null,
-}: {
-  live: boolean;
-  initialUser: AccountUser | null;
-  /** URL 里的会话 id（/c/[id]）；根路径为 null */
-  initialSessionId?: string | null;
-  /** 服务端已确认存在的会话（登录模式才有），让首屏直接有标题 */
-  initialSession?: InitialSession | null;
-}) {
-  const chat = useChat({ user: initialUser, initialSessionId, initialSession });
-  const router = useRouter();
-
-  /**
-   * Step 1：侧栏切换同时做两件事 —— 更新会话状态（现状不动）+ 把地址栏同步到 /c/[id]。
-   * Step 2/3 会把 activeId 的所有权交给 URL，那时这里只剩 router.push。
-   */
-  const selectSession = useCallback(
-    (sessionId: string) => {
-      chat.selectSession(sessionId);
-      const target = `/c/${sessionId}`;
-      if (window.location.pathname !== target) router.push(target);
-    },
-    [chat, router],
-  );
-
-  return (
-    <AppShell
-      user={initialUser}
-      live={live}
-      storage={initialUser ? "server" : "local"}
-      sessions={chat.sessions}
-      activeId={chat.activeId}
-      onSelect={selectSession}
-      // TODO(Step 3)：新建对话建出真实 id 后应 router.replace(`/c/${id}`)，现在 URL 会短暂停在旧会话
-      onNew={chat.newSession}
-      onDelete={chat.deleteSession}
-      onRename={chat.renameSession}
-    >
-      <ChatView chat={chat} live={live} />
-    </AppShell>
-  );
-}
-
-function ChatView({ chat, live }: { chat: ChatController; live: boolean }) {
-  const { openMobileSidebar, themeMode, setTheme } = useAppShell();
+export function ChatView() {
+  const { openMobileSidebar, themeMode, setTheme, live } = useAppShell();
+  const chat = useChatContext();
 
   const {
     activeId,
@@ -107,11 +58,12 @@ function ChatView({ chat, live }: { chat: ChatController; live: boolean }) {
     regenerate,
     editAndResend,
     continueGeneration,
+    draft: input,
+    setDraft: setInput,
   } = chat;
 
-  const [input, setInput] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  const [editDraft, setEditDraft] = useState("");
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -128,11 +80,10 @@ function ChatView({ chat, live }: { chat: ChatController; live: boolean }) {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
-  // 切会话时清空输入框与编辑态
+  // 切会话时退出编辑态。输入框草稿不清 —— 它按会话存在 Provider 里。
   useEffect(() => {
-    setInput("");
     setEditingId(null);
-    setDraft("");
+    setEditDraft("");
   }, [activeId]);
 
   // 这里原本挂了一个 beforeunload 拦截（生成中刷新就弹"更改可能未保存"）。
@@ -197,19 +148,19 @@ function ChatView({ chat, live }: { chat: ChatController; live: boolean }) {
                   message={message}
                   streaming={streaming}
                   editing={editingId === message.id}
-                  draft={draft}
-                  onDraftChange={setDraft}
+                  draft={editDraft}
+                  onDraftChange={setEditDraft}
                   onEditStart={(target) => {
                     setEditingId(target.id);
-                    setDraft(target.content);
+                    setEditDraft(target.content);
                   }}
                   onEditCancel={() => {
                     setEditingId(null);
-                    setDraft("");
+                    setEditDraft("");
                   }}
                   onEditSubmit={(id, text) => {
                     setEditingId(null);
-                    setDraft("");
+                    setEditDraft("");
                     void editAndResend(id, text);
                   }}
                   onRegenerate={(id) => void regenerate(id)}

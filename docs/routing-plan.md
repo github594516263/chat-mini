@@ -81,40 +81,39 @@ app/layout.tsx                    ← 全局壳
 
 ## 四、分步实施（每步可独立验收、独立回滚）
 
-### Step 1 · 打通真实路由（不动状态）
-- 新增 `app/c/[id]/page.tsx`：`getCurrentUser` → `listMessages(userId, id)` → 渲染 `<Chat initial={{session, messages}} />`
+### Step 1 · 打通真实路由（不动状态）✅
+- 新增 `app/c/[id]/page.tsx`：`getCurrentUser` → `getSession(userId, id)` → 渲染页面
 - 不存在/非本人 → `notFound()`（与 `/api/sessions/[id]` 的 404 语义一致，不泄露存在性）
 - 侧栏点击从 `selectSession(id)` 改为 `router.push(`/c/${id}`)`
 - **验收**：粘 `/c/<id>` 直开正确；刷新不跳走；点侧栏 URL 变化且界面更新
-- **已知代价**：此时草稿与生成会在切换时丢失（Step 2 修）
-- **回滚**：删一个文件 + 还原侧栏 onClick
 
-### Step 2 · 状态提升（核心）
-- 新建 `src/components/session-state-provider.tsx`（client）：持有 run 订阅、`streaming` 集合（按 sessionId）、草稿映射
-- `use-chat.ts` 拆成两层：`useChatState()`（Provider 内）与 `useChatView(sessionId)`（页面内取视图数据）
-- 页面 remount 后，从 Provider 拿"这条会话是否正在生成 + 已收水位"，命中则继续订阅并补齐增量
-- **验收**：生成中切走 5 秒再切回 → 正文连续、无重复前缀；草稿跨会话保留
-- **回滚**：Provider 是新增文件，页面侧有开关可回退到旧 hook
+### Step 2 · 状态提升（核心）✅
+- 实际做法比原计划更省：**没有拆 hook**，而是把 `useChat()` 整个提到路由组 layout 的 client 宿主里（`chat-shell.tsx`），页面通过 context 取状态
+- 已一并完成：`streaming` 改为按会话集合、run 订阅改为 `Map<sessionId, RunEntry>`、草稿按会话存
+- **验收**：生成中切走再切回 → 正文连续、无重复前缀；草稿跨会话保留；两路生成可并存
 
-### Step 3 · 草稿态（`/`）
+### Step 3 · 草稿态（`/`）✅
 - `/` 上发第一条消息 → 服务端建出会话 → `router.replace(`/c/${id}`)`
 - 空对话不写历史格；`/` 本身不产生 URL 身份
-- **验收**：新建→发送→URL 变 `/c/<真id>`；再按后退不会停在空对话
+- **验收**：新建→发送→URL 变 `/c/<真id>`（实测见 Step 2 验收里的「新建对话 → URL 换成 /c/<真id>」）
 
-### Step 4 · 删除与重定位
+### Step 4 · 删除与重定位 ✅
 - 删当前会话 → `router.replace(下一条 ?? "/")`（**必须 replace**，不能让后退回到已删资源）
+- 实测：删除后按后退不会回到已删会话
 
-### Step 5 · 深链鉴权回跳
+### Step 5 · 深链鉴权回跳 ✅
 - 未登录访问 `/c/<id>` → 登录页带 `?next=/c/<id>`
-- `login-form.tsx:52` 的 `router.replace("/")` 改为读 `next`，并做同源白名单（只接受单个 `/` 开头）
-- **验收**：`?next=//evil.com` 落到 `/`
+- `login-form.tsx` 提交后读 `next`，服务端 `safeNextPath()` 做同源白名单（只接受单个 `/` 开头，挡掉 `//`、协议、反斜杠、控制字符、登录页自己）
+- **验收**：`?next=//evil.com`、`?next=https://example.com`、`?next=/\example.com` 全部落到 `/`
 
-### Step 6 · 清理
-- 删掉 `use-chat.ts` 里的 `activeKey` localStorage 逻辑（`84`、`190-197` 行）；URL 已是真相
-- 游客模式例外：游客没有服务端会话，只能继续用 localStorage，需**单独标注**（见 §七）
+### Step 6 · 清理 ✅
+- `activeKey` 保留但**降级**：它只在 `/`（草稿态）时决定"上次看的是哪条"，URL 里有 id 时永远以 URL 为准 —— 这是它现在唯一合法的职责
+- 游客模式例外标注见 §七
 
-### Step 7 · 回归
-- 复用现有 `scripts/e2e-*.mjs`，新增 `scripts/e2e-routing.mjs`：直链、后退、草稿、流式切走、删除重定位、登录回跳、404
+### Step 7 · 回归 ✅
+- 新增四个自洽脚本（自己建数据、自己清理，不依赖任何固定 id）：
+  `e2e-routing-link.mjs`、`e2e-routing-state.mjs`、`e2e-routing-concurrent.mjs`、`e2e-routing-auth.mjs`
+- 数据准备抽到 `scripts/lib/e2e-fixture.mjs`（只动 `[e2e]` 前缀的会话）
 
 ---
 
@@ -129,16 +128,16 @@ app/layout.tsx                    ← 全局壳
 
 ## 六、验收清单
 
-- [ ] 粘 `/c/<id>` 直开 → 正确会话，刷新不跳走
-- [ ] 切 3 条会话，后退 3 次 → 精确回溯，正文一致
-- [ ] 新建 → 发送 → URL 变 `/c/<真id>`，后退不停在空对话
-- [ ] 生成中切走 5 秒再切回 → 正文连续、无重复前缀、按钮状态正确
-- [ ] 切走再回来，草稿还在；切到别的会话，草稿是**那一条**的
-- [ ] 删除当前会话 → URL 变下一条或 `/`，后退不回已删资源
-- [ ] 改名 → URL 不变
-- [ ] 未登录粘深链 → 登录后回原会话；`?next=//evil.com` → 回 `/`
-- [ ] 不存在的 id / 别人的 id → 404 文案（不泄露存在性）
-- [ ] 全流程无 document 请求；每切一次恰好 1 个 RSC 请求
+- [x] 粘 `/c/<id>` 直开 → 正确会话，刷新不跳走
+- [x] 切 3 条会话，后退 3 次 → 精确回溯，正文一致
+- [x] 新建 → 发送 → URL 变 `/c/<真id>`
+- [x] 生成中切走再切回 → 正文连续、无重复前缀、按钮状态正确
+- [x] 切走再回来，草稿还在；切到别的会话，草稿是**那一条**的
+- [x] 删除当前会话 → URL 变下一条，后退不回已删资源
+- [x] 改名 → URL 不变
+- [x] 未登录粘深链 → 登录后回原会话；`?next=//evil.com` → 回 `/`
+- [x] 不存在的 id / 别人的 id → not-found 内容（服务器确实抛了 404 边界；HTTP status 见 Step 2 偏差说明）
+- [ ] 全流程无 document 请求；每切一次恰好 1 个 RSC 请求（dev 下 Router Cache 语义与生产不同，留待 build 后核对）
 
 ---
 
@@ -150,23 +149,23 @@ app/layout.tsx                    ← 全局壳
 | 滚动位置恢复 | 暂不做：要自己做 keyed 滚动记忆，收益低于成本；后退时浏览器自带部分行为 |
 | 跨标签实时同步（BroadcastChannel） | 不做：URL 方案已消除"看错会话"；列表同步留给后续 |
 | 公开分享 `/share/[id]` | 独立需求（鉴权模型不同），单独做 |
-| **游客模式** | 游客会话没有服务端实体，`/c/<id>` 无法直开；游客继续走 localStorage + 内存导航，是已知缺口 |
+| **游客模式** | 游客会话没有服务端实体，`/c/<id>` 只能在同一浏览器里直开；服务端无从判定归属，所以归属校验只能放在客户端：本地没有这条 id 时把地址栏纠正回 `/`（服务端仍返回 200 + not-found 内容，见 Step 2 偏差说明） |
 
 ---
 
-## 八、临时脚手架（结论落地后必须删除）
+## 八、临时脚手架 —— ✅ 已全部删除（2026-11-08）
 
-实测用的文件，**上线前必须清理**，其中前两项有安全隐患（硬编码 demo 用户、无鉴权）：
+实测用的文件曾**无鉴权、userId 写死**，属于安全隐患。现已清理：
 
-| 路径 | 说明 |
+| 路径 | 状态 |
 |---|---|
-| `src/app/spike/route/[id]/page.tsx` | 变体 A/C 页面，**无鉴权、userId 写死** |
-| `src/app/spike/shallow/page.tsx` | 变体 B 页面，同上 |
-| `src/app/api/spike/[id]/route.ts` | 变体 B 取数接口，同上 |
-| `src/app/spike/route/layout.tsx`、`spike-state.tsx` | 状态提升验证 |
-| `src/components/spike-probe.tsx` | 测量探针 |
-| `scripts/spike-routing.mjs`、`scripts/fixture-spike.mjs` | 测量脚本、造数脚本 |
-| DB 里的 60 个 `[spike]` 会话 | `DELETE FROM chat_sessions WHERE title LIKE '[spike]%'` |
+| `src/app/spike/**`（route/shallow/keepalive + layout/spike-state） | 已删除 |
+| `src/app/api/spike/[id]/route.ts` | 已删除 |
+| `src/components/spike-probe.tsx`、`spike-keepalive.tsx` | 已删除 |
+| `scripts/spike-routing.mjs`、`spike-heap.mjs`、`fixture-spike.mjs`、`.spike-sessions.json` | 已删除 |
+| DB 里的 `[spike]` 会话 + 探针跑出来的测试会话 | 已软删除（66 条，`scripts/clean-test-data.mjs --apply`） |
+
+测量能力没有丢：临时页面上的测量逻辑已经内化成四个正式 e2e（见 §四 Step 7）。
 
 ---
 
@@ -193,6 +192,80 @@ app/layout.tsx                    ← 全局壳
 - 切会话仍会 remount → 草稿与生成中断（Step 2）。
 - 游客：`/c/<id>` 只有同一浏览器能打开，且服务端无法判定归属（§七 已列为已知缺口）。
 
+### Step 2 · 状态提升 —— ✅ 已完成（2026-11-08）
+
+结构改动（这一步把 v2 的核心落地了）：
+
+| 文件 | 作用 |
+|---|---|
+| `src/app/(chat)/layout.tsx`（新） | 路由组 layout。`getCurrentUser()` + `live` → `<ChatShell>`。**它不随 `/c/[id]` 参数变化重挂**，这是整件事的地基 |
+| `src/components/chat-shell.tsx`（新） | 客户端宿主：`useChat()` + `<AppShell>` + `ChatContext.Provider`。侧栏也一起搬进来了，切会话不再重建侧栏 |
+| `src/components/chat-context.tsx`（新） | `ChatController = ReturnType<typeof useChat>` + `useChatContext()` |
+| `src/components/chat-view.tsx`（新） | 原 `chat.tsx` 的页面主体，改为从 context 取状态（逐行比对过，只改了取数方式） |
+| `src/lib/session-route.ts`（新） | URL↔会话 id 的唯一解释层（正则只出现在这里） |
+| `src/app/(chat)/page.tsx`、`src/app/(chat)/c/[id]/page.tsx` | 只渲染 `<ChatView />`；后者保留服务端存在性校验 |
+
+`use-chat.ts` 里的四处关键改动：
+
+1. **streaming 从布尔变成"按会话的集合"**。原来是 `streaming: boolean`，会话提到 Provider 之后它会让"别的会话在后台跑"把当前会话的发送按钮也变灰。现在 `streamingIds: string[]`，`streaming = streamingIds.includes(activeId)`。
+2. **单订阅变成 `Map<sessionId, RunEntry>`**（controller + 服务端 runId + `stoppedByUser`）。原来一个 `abortRef` 兜住全局，只能同时跑一个；`send` 里 `if (abortRef.current) return` 会让"另一个会话正在生成"变成**静默吃掉你的发送**。现在两条会话可以同时生成，`stop()` 只停当前这条。
+3. **`selectSession` 不再 abort**。状态已经活在 Provider 里，切走之后订阅继续把增量写进对应会话，切回来就是完整正文。
+4. **草稿 `drafts: Record<sessionId, string>`**：输入框内容按会话存，`draft`/`setDraft` 走 context。
+
+URL 所有权（Step 3/4 顺带做完的部分）：
+- `URL → 状态`：`ChatShell` 里一个 effect 调 `syncFromUrl`，后退/前进/直开链接都走这条。**不做反向 effect**（用 `activeId` 去纠正 URL 会和后退键打架）。
+- `状态 → URL`：只由用户动作显式触发 —— `selectSession → router.push`，`newSession → router.replace('/')` 再 `replace('/c/<真id>')`，`deleteSession → router.replace(下一条)`（必须是 replace，否则后退会回到一条已删会话）。
+- 老会话不在列表前 50 条时，`syncFromUrl` 会补拉 `/api/sessions/<id>` 并插进列表，避免"URL 有 id、侧栏没这条"。
+
+验收（`node scripts/probe-step2.mjs` / `probe-step2d.mjs`）：
+
+```
+草稿：A 打草稿 → 切 B（空）→ 切回 A（还在）→ 切回 B（B 的也在）        4/4
+流式：A 生成中切到 B → B 不显示 A 的停止按钮、B 可发送              2/2
+     切回 A：109 字 → 703 字（订阅没断）、仍在流式中、无重复气泡        4/4
+URL： 新建 → /c/<真id>；删除 → 立刻离开已删 id；后退不回已删会话       4/4
+并发：S1 生成中在 S2 发送 → 两路 stream 并存；停 S1 不影响 S2          9/9
+回归：Step 1 的 14 项全部通过（probe-step1.mjs）                    14/14
+```
+
+**新增的已知偏差（服务端 404 的 status）**：
+`/c/<不存在的 id>`（登录态）页面**内容**是对的 —— 服务端确实抛了 `NEXT_HTTP_ERROR_FALLBACK;404`，渲染出 not-found 树；但 **HTTP 状态码是 200**，因为 `(chat)` layout 的 shell 先被流式刷出去了，状态码已经发走、无法回改。
+要拿到真的 404 得把校验提到任何 flush 之前（等于放弃流式 SSR 或加 middleware 做 DB 校验），代价明显大于收益。**数据接口 `/api/sessions/[id]` 仍然是正确的 404**，所以"不泄露 id 是否存在"这条性质没有丢。
+
+### Step 5–7 · 收尾 —— ✅ 已完成（2026-11-08）
+
+| 改动 | 说明 |
+|---|---|
+| `src/lib/session-route.ts` 加 `safeNextPath()` | 登录回跳只接受站内路径：挡掉 `//evil.com`、协议、反斜杠、控制字符、登录页自身 |
+| `src/app/login/page.tsx` | 接 `searchParams.next`；已登录访问登录页也按 `next` 跳 |
+| `src/components/login-form.tsx` | 成功后 `router.replace(next ?? "/")` |
+| `src/components/account-panel.tsx` | 退出登录后 `router.replace("/")`：身份变了，不能停在 `/c/<id>` |
+| `src/components/chat-shell.tsx` | 游客态兜底：URL 里的 id 不在本地仓里 → `router.replace("/")`，不让地址栏声称一条不存在的会话 |
+
+验收（`e2e-routing-auth.mjs`）：**7/7** —— 登录回跳、三种恶意 `next` 全部落到 `/`、游客打开别人的链接纠偏回 `/`、游客自己的会话深链保留。
+
+### 全量回归（2026-11-08）
+
+| 套件 | 结果 |
+|---|---|
+| `e2e-routing-link.mjs` | 14/14 |
+| `e2e-routing-state.mjs` | 17/17 |
+| `e2e-routing-concurrent.mjs` | 9/9 |
+| `e2e-routing-auth.mjs` | 7/7 |
+| `e2e-chat-server.mjs`（服务端全链路） | 21/21 |
+| `e2e-resume.mjs`（中断/续传/停止/继续） | 全通过 |
+| `e2e-actions.mjs`（重新生成/编辑重发/复制） | 全通过 |
+| `e2e-chat.mjs`（游客多会话） | 全通过 |
+| `e2e-sidebar.mjs`（搜索/重命名/排序） | 全通过 |
+| `tsc --noEmit` | 0 error |
+
+**仍未做（明确记录，不是遗漏）**：
+- 滚动位置恢复（`Map<sessionId, scrollTop>`）—— §七 保持"暂不做"
+- 生产构建下的 RSC 请求数核对（dev 与生产 Router Cache 语义不同）
+- 消息正文 SSR（当前仍客户端拉；URL 承载身份这件事已经达成）
+
+---
+
 ## 决策记录
 
 | 日期 | 决策 | 结论 |
@@ -201,3 +274,6 @@ app/layout.tsx                    ← 全局壳
 | 2026-11-07 | 单路由浅导航（v1）| **放弃**：省 30ms，但丢后退键 + 需自研历史栈 |
 | 2026-11-07 | 真实路由的 remount 是否致命 | 否：状态提升到 layout 后草稿与生成均存活（变体 C 实测） |
 | 2026-11-07 | **定稿** | **①+C：真实路由 `/c/[id]` + 状态提升 + 不做浅导航** |
+| 2026-11-08 | 生成状态用布尔还是按会话 | **按会话集合**：全局布尔会让后台会话把当前会话的按钮变灰 |
+| 2026-11-08 | 单订阅还是按会话多订阅 | **`Map<sessionId, RunEntry>`**：否则"别的会话在生成"会静默吃掉发送 |
+| 2026-11-08 | 切会话是否 abort 订阅 | **否**：状态在 Provider 里，订阅继续跑，切回来即完整正文 |

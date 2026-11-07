@@ -1,15 +1,13 @@
-// 【临时·Step 1 验收】真实路由 /c/[id] 是否真的打通
-//   node scripts/probe-step1.mjs [baseUrl]
+// 真实路由 /c/[id] 的端到端验收
+//   node scripts/e2e-routing-link.mjs [baseUrl]
 //
 // 覆盖：登录态直开、侧栏切换写 URL、后退键回溯、刷新保持、404、游客路径。
+// 会话数据由脚本自己建、自己清（scripts/lib/e2e-fixture.mjs）。
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { prepareFixtures, purgeFixtures } from "./lib/e2e-fixture.mjs";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const ids = JSON.parse(readFileSync(join(root, "scripts", ".spike-sessions.json"), "utf8"));
 const baseUrl = (process.argv[2] ?? "http://127.0.0.1:3123").replace(/\/$/, "");
+const { userId, A, B } = await prepareFixtures();
 const cdpPort = Number(process.env.CDP_PORT ?? 9223);
 const USERNAME = process.env.E2E_USER ?? "demo";
 const PASSWORD = process.env.E2E_PASS ?? "DemoPass2026!";
@@ -64,7 +62,7 @@ const state = () =>
     path: location.pathname,
     title: document.querySelector('h1')?.textContent?.trim() ?? null,
     bubbles: document.querySelectorAll('[data-role]').length,
-    text: document.body.innerText.slice(0, 300)
+    text: document.body.innerText
   })`);
 
 async function goto(url) {
@@ -84,8 +82,8 @@ const loginStatus = await evaluate(`fetch('/api/auth/login', {
 check("登录成功", loginStatus === 200, `status ${loginStatus}`);
 
 // ---------------------------------------------------------------- 直开 /c/[id]
-const targetId = ids[0];
-const expectedTitle = "[spike] 压力测试会话 00";
+const targetId = A.id;
+const expectedTitle = A.title;
 await goto(`${baseUrl}/c/${targetId}`);
 let s = await state();
 check("直开 /c/[id] → URL 保持", s.path === `/c/${targetId}`, s.path);
@@ -93,13 +91,13 @@ check("直开 /c/[id] → 标题正确", s.title === expectedTitle, `h1 = ${s.ti
 check("直开 /c/[id] → 消息已渲染", s.bubbles > 0, `${s.bubbles} 条气泡`);
 
 // ---------------------------------------------------------------- 侧栏切换
-const otherId = ids[3];
+const otherId = B.id;
 await evaluate(`document.querySelector('[data-session-id="${otherId}"]')?.click(); true`);
 await waitFor(`location.pathname === '/c/${otherId}'`, 15000);
 await sleep(800);
 s = await state();
 check("侧栏切换 → URL 变成 /c/<新id>", s.path === `/c/${otherId}`, s.path);
-check("侧栏切换 → 标题跟着变", s.title === "[spike] 压力测试会话 03", `h1 = ${s.title}`);
+check("侧栏切换 → 标题跟着变", s.title === B.title, `h1 = ${s.title}`);
 check("侧栏切换 → 消息换成了新会话", s.bubbles > 0, `${s.bubbles} 条气泡`);
 
 // ---------------------------------------------------------------- 后退键
@@ -150,4 +148,5 @@ if (guest) {
 const failed = results.filter((r) => !r.ok);
 console.log(`\n通过 ${results.length - failed.length}/${results.length}`);
 ws.close();
+await purgeFixtures(userId);
 process.exit(failed.length === 0 ? 0 : 1);

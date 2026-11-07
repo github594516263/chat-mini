@@ -20,6 +20,8 @@ for (const line of readFileSync(join(root, ".env.local"), "utf8").split(/\r?\n/)
 /** 测试脚本固定用过的提示词 / 标题 */
 const TEST_TITLES = [
   "[fixture]%",
+  "[spike]%",
+  "用大约%",
   "用三句话解释一下什么是数据库事务%",
   "用一句话解释什么是数据库索引%",
   "详细写 900 字讲解 InnoDB 的 Buffer Pool%",

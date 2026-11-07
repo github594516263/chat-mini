@@ -61,6 +61,8 @@ export function AccountPanel({
     setBusy(true);
     setOpen(false);
     await logoutRequest();
+    // 退出后身份变了：/c/<id> 在游客态没有对应会话，回首页避免停在一条空会话上
+    router.replace("/");
     router.refresh();
     setBusy(false);
   }

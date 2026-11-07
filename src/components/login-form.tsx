@@ -10,7 +10,14 @@ type Mode = "login" | "register";
 const FIELD =
   "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary placeholder:text-muted-foreground disabled:opacity-60";
 
-export function LoginForm({ allowRegister }: { allowRegister: boolean }) {
+export function LoginForm({
+  allowRegister,
+  next = null,
+}: {
+  allowRegister: boolean;
+  /** 登录成功后去哪（已经过 safeNextPath 校验的站内路径） */
+  next?: string | null;
+}) {
   const router = useRouter();
 
   const [mode, setMode] = useState<Mode>("login");
@@ -49,7 +56,8 @@ export function LoginForm({ allowRegister }: { allowRegister: boolean }) {
       }
 
       // 用 replace 而不是 push：登录成功后不该能按后退回到登录页
-      router.replace("/");
+      // next 只在站内路径时有值（服务端已经校验过），否则回首页
+      router.replace(next ?? "/");
       router.refresh();
     } catch {
       setError("网络错误，请重试");

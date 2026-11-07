@@ -27,6 +27,8 @@ type AppShellApi = {
   openSettings: (section?: SettingsSection) => void;
   themeMode: ThemeMode;
   setTheme: (mode: ThemeMode) => void;
+  /** 当前是否接了真实模型（顶栏要显示 live / mock） */
+  live: boolean;
 };
 
 const AppShellContext = createContext<AppShellApi | null>(null);
@@ -90,8 +92,8 @@ export function AppShell({ user, live, storage, children, ...sidebarProps }: App
   }, []);
 
   const api = useMemo<AppShellApi>(
-    () => ({ collapsed, toggleSidebar, openMobileSidebar, openSettings, themeMode, setTheme }),
-    [collapsed, toggleSidebar, openMobileSidebar, openSettings, themeMode, setTheme],
+    () => ({ collapsed, toggleSidebar, openMobileSidebar, openSettings, themeMode, setTheme, live }),
+    [collapsed, toggleSidebar, openMobileSidebar, openSettings, themeMode, setTheme, live],
   );
 
   return (

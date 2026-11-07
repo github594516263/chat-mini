@@ -358,11 +358,49 @@ GET    /api/health                                   不需要登录（出问题
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P1** | 建库建表 + 连接层 + 健康检查 | ✅ **已完成** |
-| P2 | 注册/登录/登出/me + `/login` 页面 + 首页守卫 + 命令行建号脚本 | 待做 |
+| **P2** | 注册/登录/登出/me + `/login` 页面 + 命令行建号脚本 | ✅ **已完成** |
 | P3 | 会话/消息 CRUD（带 `user_id` 隔离）+ 搜索 | 待做 |
 | P4 | 生成端改造（服务端取历史 + 秒级落盘 + 启动清理 running） | 待做 |
 | P5 | 前端接入（服务端为真相 + 本地缓存降级） | 待做 |
 | P6 | 回归 7 个 e2e + 新增认证/越权/重启 3 个 | 待做 |
+
+### P2 验收证据
+
+```
+node scripts/e2e-auth.mjs → 16/16 通过
+
+✅ 注册默认关闭（403）
+✅ 未登录 me → 401
+✅ 密码错 → 401「用户名或密码错误」
+✅ 用户不存在与密码错返回同一句（防枚举）
+✅ 正确登录 → 200
+✅ Set-Cookie: Path=/; Expires=…; HttpOnly; SameSite=lax（本地无 Secure）
+✅ 登录后 me → 200 {"username":"demo"}
+✅ 跨站 Origin → 403
+✅ 表单 Content-Type → 400
+✅ 登出 → 200，之后 me → 401
+✅ 连错 5 次后锁定：401,401,401,401,401,429
+✅ 锁定期内仍 429（"请 300 秒后再试"）
+
+直接查库验证（不是看代码猜）：
+✅ 按 sha256(token) 能查到登录会话
+✅ 按原始 token 查不到（库里不存明文令牌）
+✅ token_hash 列长度 64（sha256 hex）
+✅ password_hash = scrypt$65536$8$1$…（130 字符，不含明文密码）
+✅ 登出后 auth_sessions 行被删除
+```
+
+浏览器端（CDP 实测）：
+
+```
+游客首页 header   → 新对话 | 登录 | deepseek-chat   输入框可用（游客能聊）
+登录页            → 用户名/密码两个输入框 + 登录按钮 + "本实例未开放注册"
+登录后首页 header → 新对话 | demo | deepseek-chat   有登出按钮
+已登录访问 /login → 自动跳回 /                     ✅
+点登出            → 顶栏变回"登录"入口
+```
+
+回归：`e2e-chat` 9 步、`e2e-actions` 5 步全部通过——游客链路没被登录改造破坏。
 
 ### P1 验收证据
 
@@ -401,6 +439,8 @@ scripts/selfcheck.sql:
 1. **InnoDB 全文索引只在事务提交时更新**：未提交事务里 `MATCH ... AGAINST` 搜不到刚插入的行。验证必须在 `COMMIT` 之后。
 2. **`mysql2` 的 `ExecuteValues` 类型不接受 `unknown[]`**：参数类型要写成具体联合（`string | number | Date | null | Buffer …`），`undefined` 会让预处理语句参数数量不匹配，用 `null`。
 3. **PowerShell 控制台的 UTF-8 显示**：中文注释显示乱码可能只是控制台编码，查库里实际字节再下结论。
+4. **`cookies()` 在 Server Component 里只能读不能写**：写 cookie 会抛错。所以滑动续期只在路由处理器里做（`getCurrentUser({ renew: true })` 只在 `/api/auth/me` 调用），Server Component 里只更新 `last_seen_at`。
+5. **非交互式输入要按行缓冲**：`scripts/create-user.mjs` 从管道读两行密码时，一次 `data` 事件可能同时带来两行；每条读取各挂监听器会吞掉第二行。改用行队列后正常。
 
 ---
 

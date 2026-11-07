@@ -35,9 +35,49 @@ cp .env.example .env.local
 页面右上角的 `mock` / `live` 徽标会告诉你当前走的是哪条路。
 key 无效时不会静默失败，错误会以一条 `error` 事件推到界面上（并提示去检查 `DEEPSEEK_BASE_URL`）。
 
+## 登录与账号（MySQL）
+
+数据库表结构在 `scripts/schema.sql`，设计见 [DESIGN.md](DESIGN.md)。首次部署三步：
+
+```bash
+# 1. 建表（应用账号没有 DDL 权限，必须用 root 跑一次）
+mysql -u root -p --default-character-set=utf8mb4 chat_mini < scripts/schema.sql
+
+# 2. 建库和低权限应用账号（只需要跑一次，示例）
+#    CREATE DATABASE chat_mini CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+#    CREATE USER 'chat_app'@'localhost' IDENTIFIED BY '...';
+#    GRANT SELECT, INSERT, UPDATE, DELETE ON chat_mini.* TO 'chat_app'@'localhost';
+
+# 3. 建自己的账号（注册接口默认关闭，账号只能这样加）
+node scripts/create-user.mjs 你的用户名
+#    改密码：node scripts/create-user.mjs 你的用户名 --reset
+```
+
+自检：
+
+```bash
+curl http://localhost:3000/api/health     # 数据库连上了吗、表建齐了吗
+node scripts/e2e-auth.mjs                 # 16 项认证检查（登录/登出/限流/CSRF/越权报文）
+```
+
+**游客模式**：不登录也能正常聊天，对话只存在这台电脑的浏览器里；登录后看到的是账号里的数据。
+两套数据**不做合并**——这是刻意的取舍，省掉一堆冲突处理。
+
+| 登录页 | 登录后的顶栏 |
+| --- | --- |
+| ![登录](docs/login.png) | ![账号](docs/account.png) |
+
+**密码与会话怎么存**（细节见 DESIGN.md §6）：
+
+- 密码用 Node 内置 `scrypt`（N=65536，每用户独立随机盐，异步版避免堵事件循环），库里是 `scrypt$65536$8$1$salt$hash`
+- cookie 里是 32 字节随机令牌，库里只存 `sha256(令牌)`——库泄露也不能直接拿去做 cookie
+- cookie 属性 `HttpOnly` + `SameSite=Lax`，本地不带 `Secure`（否则 http://localhost 存不下）
+- 同一用户名+IP 连错 5 次锁 5 分钟
+
 ## 现在已经能做的
 
 - 流式对话（真模型 / 假数据流一键切换）
+- **登录 / 游客双模式**：登录后对话存 MySQL、多设备可见；不登录也能用（数据只在本地浏览器）
 - 停止生成（AbortController 一路断到 provider）
 - **多会话**：侧栏列表、切换、删除、标题自动取首条消息；`localStorage` 持久化，刷新不丢
 - **断线续传**：生成跑在服务端，刷新/断网/切标签页回来能接着续（按 `seq` 水位补发，不重头不重复）
@@ -68,6 +108,17 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 
 | 文件 | 干什么 |
 | --- | --- |
+| `src/lib/db.ts` | MySQL 连接层：连接池（挂 globalThis 防热重载泄漏）、预处理语句、事务、错误翻译成人话 |
+| `src/lib/password.ts` | 密码哈希：Node 内置 scrypt（异步）+ `timingSafeEqual` |
+| `src/lib/auth.ts` | 登录会话：建令牌、cookie 读写、`getCurrentUser`、过期清理 |
+| `src/lib/users.ts` | 账号的数据访问：校验、建号、校验凭据（不存在时也走假验证防时序探测） |
+| `src/lib/http.ts` | 路由小工具：JSON 出入口、Origin 校验、取 IP/UA |
+| `src/lib/rate-limit.ts` | 登录爆破防护（5 次锁 5 分钟，进程内存） |
+| `src/app/api/health/route.ts` | 环境自检：数据库连没连上、表建齐没有 |
+| `src/app/api/auth/*` | `register`（默认关）/ `login` / `logout` / `me` |
+| `src/app/login/page.tsx` | 登录页（已登录自动跳回首页） |
+| `src/components/login-form.tsx` | 登录/注册表单 |
+| `src/components/account-menu.tsx` | 顶栏账号区：未登录显示"登录"，已登录显示名字 + 登出 |
 | `src/app/api/chat/route.ts` | 建 run：立刻返回 `runId`，生成在服务端后台继续跑 |
 | `src/app/api/chat/stream/route.ts` | 订阅 run：`?runId=&afterSeq=` 先回放再实时推 |
 | `src/app/api/chat/cancel/route.ts` | 停掉服务端生成（否则"停止"只是不看了，token 还在烧） |

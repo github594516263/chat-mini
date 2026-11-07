@@ -7,6 +7,7 @@ import { code } from "@streamdown/code";
 
 import { Sidebar } from "@/components/sidebar";
 import { ThemeMenu } from "@/components/theme-menu";
+import { AccountMenu, type AccountUser } from "@/components/account-menu";
 import { useChat, type ChatUIMessage } from "@/lib/use-chat";
 import { useTheme } from "@/lib/use-theme";
 import { cn } from "@/lib/utils";
@@ -38,7 +39,13 @@ const SUGGESTIONS = [
 const ACTION_BTN =
   "flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
 
-export default function Chat({ live }: { live: boolean }) {
+export default function Chat({
+  live,
+  initialUser,
+}: {
+  live: boolean;
+  initialUser: AccountUser | null;
+}) {
   const {
     sessions,
     activeId,
@@ -156,6 +163,7 @@ export default function Chat({ live }: { live: boolean }) {
           <h1 className="min-w-0 flex-1 truncate text-sm font-medium">
             {activeSession?.title ?? "新对话"}
           </h1>
+          <AccountMenu user={initialUser} />
           <ThemeMenu mode={themeMode} onSelect={setTheme} />
           <span className="hidden shrink-0 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground sm:inline">
             deepseek-chat

@@ -1,0 +1,413 @@
+# 服务端化设计：MySQL 存储 + 登录
+
+> 状态：**P1 已实施并验证**，P2 起待做
+> 最后更新：2026-11-07
+> 相关代码：`src/lib/db.ts`、`scripts/schema.sql`、`scripts/selfcheck.sql`、`src/app/api/health/route.ts`
+
+---
+
+## 1. 为什么要做
+
+改造前，会话和消息全部存在浏览器 `localStorage` 里。实测出来的问题：
+
+| 问题 | 后果 |
+|---|---|
+| `localStorage` 约 5MB 上限，`saveStore()` 里 `catch { }` 静默吞掉写入失败 | 顶到上限后，新消息看起来发出去了，一刷新就没了 |
+| 数据只活在一台机器的那个浏览器里 | 换设备、换浏览器、清缓存 = 全丢 |
+| 多标签页各自整包写入，后写覆盖先写 | 两边互相踩 |
+| 服务端没有历史 | 每轮都要前端把完整 `messages` 重发（token 随对话长度线性上涨） |
+| 服务端没有历史 | 做不了搜索、统计、审计、RAG、内容审核 |
+| 历史在客户端 | 用户可随意篡改，服务端没有权威版本 |
+
+**生成**在上一轮已经搬到服务端（`src/lib/runs.ts`，方案 B 断线续传），这次要搬的是**状态**。
+
+---
+
+## 2. 目标 / 非目标
+
+### 目标
+
+1. 会话与消息入库，跨设备、跨浏览器可见，容量不再受 5MB 限制
+2. 服务端持有历史，生成时服务端自己取历史拼 prompt（前端不再上传整包）
+3. 有登录：多用户隔离，别人看不到别人的对话
+4. 服务端能查询：会话搜索（标题 + 正文全文检索）
+
+### 非目标（本轮明确不做）
+
+- 邮箱/短信验证、找回密码（忘记密码只能管理员重置）
+- 第三方登录（GitHub / 微信）——将来可选
+- 附件、多模态、语音
+- 跨实例部署（单机 MySQL 足够；要扩容时把数据访问层换成 Postgres）
+
+### 一条必须写清楚的天花板
+
+> **MySQL 存不下"正在跑的 DeepSeek 响应"。**
+> 上游 SSE 连接一旦断开（进程重启、崩溃），那条流就真的没了。
+> 所以"run 落库"的价值不是完美续传，而是：**重启后知道哪些回答没写完 → 自动标成"生成中断" → 提供"继续生成"按钮**。
+> 进程不重启时的刷新续传，仍由内存 run 表 + seq 缓冲负责（已验证）。
+
+---
+
+## 3. 已确认的决策（决策记录）
+
+| # | 决策 | 备选 | 理由 |
+|---|---|---|---|
+| D1 | 注册接口保留但**默认关闭**（`ALLOW_REGISTER=false`，关闭时返回 403） | 全开放注册 / 删掉接口 | 个人站，别人进来不该能注册；代码保留，将来开一个环境变量即可 |
+| D2 | 登录名用**用户名**，不用邮箱 | 邮箱 + 验证邮件 | 邮箱会引入 SMTP、验证链接、找回密码一整套 |
+| D3 | **游客模式 B**：未登录也能聊，但数据只在浏览器；登录后看的是自己账号的数据 | A 强制登录 / B+合并本地会话 | 首次进来就能用；明确**不做**本地数据迁移合并，省掉一堆冲突处理 |
+| D4 | 数据库用 **MySQL**（放弃 SQLite / Postgres） | SQLite 单文件 | 本机已有 MySQL 9.4；顺便作为学习目标。代价是要多一个常驻服务，见 §11 |
+
+---
+
+## 4. 架构总览
+
+```
+浏览器                          Next.js (Node runtime)              MySQL 9.4
+┌─────────────────┐            ┌──────────────────────┐           ┌──────────────┐
+│ 页面 / 组件      │  fetch     │ /api/auth/*          │           │ users        │
+│ use-chat        │ ─────────► │ /api/sessions*       │  mysql2   │ auth_sessions│
+│ （服务端为真相） │            │ /api/chat            │ ────────► │ chat_sessions│
+│                 │            │ /api/health          │  连接池   │ messages     │
+│ localStorage    │ ◄───────── │                      │           │ runs         │
+│ = 只读缓存      │   NDJSON   │ runs.ts（内存事件缓冲）│           │              │
+└─────────────────┘            └──────────┬───────────┘           └──────────────┘
+                                          │ SSE (stream:true)
+                                          ▼
+                                 api.deepseek.com/chat/completions
+```
+
+三层职责：
+
+- **持久层（MySQL）**：会话、消息、账号、登录会话、run 元信息
+- **运行时层（进程内存 `runs.ts`）**：正在生成的事件缓冲 + seq 水位（不逐条落库，见 §8）
+- **协议层（NDJSON 自定义事件）**：`delta / think_delta / usage / completed / error / sync`
+
+---
+
+## 5. 数据模型
+
+### 命名约定
+
+| 表 | 含义 | 备注 |
+|---|---|---|
+| `users` | 账号 | |
+| `auth_sessions` | **登录**会话（一次登录 = 一行 = 一个 cookie） | 与下者刻意区分命名 |
+| `chat_sessions` | **聊天**会话（一个对话框） | 原设计叫 `sessions`，加登录后改名避免歧义 |
+| `messages` | 消息 | |
+| `runs` | 生成任务元信息 | 事件明细不入库 |
+
+时间统一 `DATETIME(3)`（毫秒精度，前端 `Date.now()` 对得上）。
+
+### users
+
+```
+id            CHAR(36)     PK
+username      VARCHAR(32)  UNIQUE NOT NULL      登录名，存小写
+display_name  VARCHAR(64)  NOT NULL DEFAULT ''
+password_hash VARCHAR(255) NOT NULL             scrypt$N$r$p$salt$hash
+created_at    DATETIME(3)  NOT NULL
+last_login_at DATETIME(3)  NULL
+disabled      TINYINT(1)   DEFAULT 0            封禁用，不删数据
+```
+
+### auth_sessions
+
+```
+id           CHAR(36)     PK
+user_id      CHAR(36)     FK→users ON DELETE CASCADE
+token_hash   CHAR(64)     UNIQUE NOT NULL       sha256(cookie 原始 token)，库里不存明文
+created_at   DATETIME(3)
+expires_at   DATETIME(3)  NOT NULL
+last_seen_at DATETIME(3)
+user_agent   VARCHAR(255)                      用于"已登录设备"列表
+ip           VARCHAR(45)                       IPv6 也放得下
+INDEX (user_id, expires_at)
+```
+
+### chat_sessions
+
+```
+id         CHAR(36)     PK
+user_id    CHAR(36)     FK→users ON DELETE CASCADE    数据隔离的主键条件
+title      VARCHAR(120) NOT NULL DEFAULT '新对话'
+created_at DATETIME(3)
+updated_at DATETIME(3)
+deleted_at DATETIME(3)  NULL    软删除：误删可救，也不连带删消息
+INDEX (user_id, deleted_at, updated_at DESC)          ← 列表查询一条索引走完
+```
+
+### messages
+
+```
+id                CHAR(36)   PK
+session_id        CHAR(36)   FK→chat_sessions ON DELETE CASCADE
+seq               INT        NOT NULL     会话内顺序号 1,2,3…
+role              ENUM('user','assistant','system')
+content           MEDIUMTEXT NOT NULL
+thinking          MEDIUMTEXT NULL         思维链单独一列，便于折叠与不计入正文
+prompt_tokens     INT NULL
+completion_tokens INT NULL
+status            ENUM('streaming','complete','interrupted','stopped','error')
+error_text        VARCHAR(500) NULL
+run_id            VARCHAR(24)  NULL
+created_at / updated_at DATETIME(3)
+UNIQUE (session_id, seq)
+INDEX (session_id, seq)
+FULLTEXT (content) WITH PARSER ngram     中文搜索用 MySQL 内置 ngram 分词
+```
+
+**三个刻意的选择**
+
+1. **用 `seq` 排序，不用 `created_at`**：同一毫秒写入的两条消息时间戳拉不开顺序，序号可以。它和流式协议里的 `seq` 是同一个思想。
+2. **`MEDIUMTEXT` 而不是 `TEXT`**：`TEXT` 上限 64KB，`utf8mb4` 下每字符最多 4 字节 → 约 1.6 万字符。一篇 2000 词英文作文 + Markdown 很容易逼近。
+3. **状态收敛成枚举**：改造前有 `pending / stopped / interrupted / error` 四个布尔，组合出没人验证过的状态；现在一个 `status` 五值，前端一个 `switch` 就够。
+
+### runs
+
+```
+id         VARCHAR(24) PK
+user_id    CHAR(36)    NULL     游客的 run 没有归属
+session_id CHAR(36)    NULL
+message_id CHAR(36)    NULL
+status     ENUM('running','done','error','aborted')
+created_at / updated_at DATETIME(3)
+INDEX (status, updated_at)
+INDEX (session_id)
+```
+
+**启动清理**：服务启动时把 `status='running'` 的行对应的消息标成 `interrupted` —— 这是"进程重启后自动降级"的落地方式。
+
+---
+
+## 6. 认证设计
+
+### 方案选型
+
+| 方案 | 优点 | 缺点 | 结论 |
+|---|---|---|---|
+| **Cookie + 服务端会话表** | 可立即撤销（登出/改密/踢设备）；token 不给 JS 读（防 XSS 偷）；实现直白 | 每次请求查一次库（走唯一索引，亚毫秒） | ✅ 采用 |
+| JWT | 无状态，不查库 | 登出无法真正失效；需要黑名单才能撤销；存 localStorage 会被 XSS 偷 | ❌ |
+| 第三方 OAuth | 不管密码 | 要外部应用注册 + 回调域名，本地开发麻烦 | 将来可选 |
+
+### 密码存储
+
+```
+格式（单字段）：scrypt$65536$8$1$<salt_base64>$<hash_base64>
+                算法    N   r p   16字节随机盐      64字节派生密钥
+```
+
+四条硬规则：
+
+1. 绝不明文；绝不用裸 SHA-256/MD5（GPU 一秒几十亿次，等于没加密）
+2. 每个用户独立随机盐（`crypto.randomBytes(16)`）
+3. 用 Node 内置 `node:crypto` 的 scrypt，不引第三方包
+4. **用异步 `crypto.scrypt`，不用 `scryptSync`** —— 同步版会阻塞事件循环 ~160ms，而本项目同一进程正在流式生成，一堵所有正在看的流都会卡。这是本项目特有的理由。
+
+本机实测（决定参数）：
+
+```
+N=16384  r=8 p=1 →  40 ms / 16 MB
+N=65536  r=8 p=1 → 158 ms / 64 MB      ← 采用（每次登录付一次）
+N=131072 r=8 p=1 → 310 ms / 128 MB     OWASP 推荐档位，可调
+```
+
+校验用 `crypto.timingSafeEqual` 比较（防时序侧信道）；登录失败统一返回「用户名或密码错误」，不区分"用户不存在"与"密码错"。
+
+### 登录令牌
+
+```
+① token = crypto.randomBytes(32).toString("base64url")     // 43 字符
+② cookie 放原始 token
+③ 库里只存 sha256(token)                                   ← 库泄露也不能直接当 cookie 用
+④ 每次请求：sha256(cookie) 查 auth_sessions，检查 expires_at
+```
+
+cookie 属性：
+
+| 属性 | 值 | 原因 |
+|---|---|---|
+| `HttpOnly` | 开 | JS 读不到 → XSS 偷不走 |
+| `SameSite` | `Lax` | 挡住绝大多数 CSRF |
+| `Secure` | 生产开 / 本地关 | 本地是 `http://localhost`，开了浏览器不存 |
+| `Max-Age` | 7 天（滑动续期） | 活跃一次顺延 |
+
+### 其他防护
+
+| 威胁 | 措施 |
+|---|---|
+| CSRF | SameSite=Lax + 写操作必须 `Content-Type: application/json` + 校验 `Origin` |
+| 用户枚举 | 登录失败措辞统一 |
+| 暴力破解 | 同一 username+IP 连错 5 次锁 5 分钟（内存计数，单实例够） |
+| 越权读 | 所有查询强制带 `user_id`；越权返回 **404**（403 等于承认资源存在） |
+| SQL 注入 | 全部 `?` 预处理语句，不拼字符串；应用账号无 DDL 权限 |
+| 会话堆积 | 过期行定期删除（启动时 + 每小时）；支持"踢掉某设备" |
+
+---
+
+## 7. 游客模式（决策 D3）
+
+```
+游客：  POST /api/chat   body = { messages: [...] }     服务端只跑生成，不写库
+        → 会话与消息存浏览器 localStorage
+        → 刷新续传靠 runId + afterSeq（不落库，进程重启即丢）
+
+登录：  POST /api/chat   body = { sessionId, content }   服务端取历史 + 写库
+        → 前端不持有权威数据，只做缓存
+```
+
+**同一端点两种 body 语义**是刻意的取舍：游客不留任何服务端痕迹，登录后也**不合并**游客历史。代价是端点实现要分支，收益是不用写"本地会话 → 账号"的合并与冲突逻辑。
+
+---
+
+## 8. 写路径与事务边界
+
+### 发一条消息（登录用户）
+
+```sql
+-- ① 建会话（仅首条消息时需要）
+BEGIN;
+  INSERT INTO chat_sessions (id, user_id, title, created_at, updated_at) ...;
+  INSERT INTO messages (id, session_id, seq=1, role='user', content=?, status='complete') ...;
+  INSERT INTO messages (id, session_id, seq=2, role='assistant', content='', status='streaming', run_id=?) ...;
+  INSERT INTO runs (id, user_id, session_id, message_id, status='running') ...;
+COMMIT;
+
+-- ② 生成（进程内存，事件不逐条写库）
+
+-- ③ 流式期间：每 ~1 秒 UPDATE 一次半截正文
+UPDATE messages SET content = ?, updated_at = ? WHERE id = ?;
+
+-- ④ 结束
+BEGIN;
+  UPDATE messages SET content=?, thinking=?, prompt_tokens=?, completion_tokens=?,
+         status='complete', run_id=NULL, updated_at=? WHERE id = ?;
+  UPDATE runs SET status='done', updated_at=? WHERE id = ?;
+COMMIT;
+```
+
+**为什么 delta 不逐条写库**：一次长回答可能 800+ 个 delta，逐条 INSERT 是每秒几百次写——MySQL 扛得住但没意义。落盘的是"1 秒粒度的正文快照"，用来兜崩溃；逐字续传由内存事件缓冲负责。
+
+### 事务必须走同一个连接
+
+`db.ts` 的 `withTransaction()` 传下 `conn`，事务内**必须**用 `conn.query`，用模块级 `query()` 会从池里另取连接、跑在事务外面。这条写在代码注释里。
+
+---
+
+## 9. API 契约
+
+```
+# 认证
+POST   /api/auth/register   { username, password }   ALLOW_REGISTER=false 时 403
+POST   /api/auth/login      { username, password }   → Set-Cookie
+POST   /api/auth/logout                              删行 + 清 cookie
+GET    /api/auth/me                                  → { id, username, displayName } | 401
+GET    /api/auth/sessions                            已登录设备
+DELETE /api/auth/sessions/:id                        踢掉某设备
+
+# 会话
+GET    /api/sessions?limit=50&cursor=<updated_at>    列表（游标分页，不用 offset）
+POST   /api/sessions                                 新建
+PATCH  /api/sessions/:id      { title }              改名
+DELETE /api/sessions/:id                             软删除
+
+# 消息
+GET    /api/sessions/:id/messages[?afterSeq=N]       历史 / 增量
+GET    /api/sessions/search?q=断线                   标题 + 正文（ngram FULLTEXT）
+
+# 生成
+POST   /api/chat                                      游客 { messages } / 登录 { sessionId, content }
+GET    /api/chat/stream?runId=&afterSeq=              订阅（回放 + 实时）
+POST   /api/chat/cancel                               { runId }
+
+# 运维
+GET    /api/health                                   不需要登录（出问题时也要能看原因）
+```
+
+**为什么列表用游标而不是 `offset`**：翻到第 10 页时数据库要扫前 500 行再丢掉，越翻越慢；游标（从上次最后一条的 `updated_at` 往后取）永远只走索引。
+
+---
+
+## 10. 前端职责变化
+
+| | 改造前 | 改造后 |
+|---|---|---|
+| 真相来源 | `localStorage` | **MySQL**（经 API） |
+| `localStorage` | 全部数据 | 只留主题偏好 + 列表/消息**只读缓存**（首屏不闪） |
+| 发送 | 前端拼完整 history 上传 | 只传 `sessionId + 文本` |
+| 多标签 | 互相覆盖 | `visibilitychange` 时按 `updated_at` 拉增量 |
+| 写入 | 直接落盘 | 乐观更新 + 服务端确认 + 失败回滚 |
+
+`use-chat.ts` 的**对外接口不变**（`send / stop / regenerate / editAndResend / continueGeneration / newSession`），只换内部实现，组件层零改动。
+
+---
+
+## 11. 运维与代价
+
+| 项 | 说明 |
+|---|---|
+| 依赖 | 多一个常驻服务：`net start MySQL94`（没起来站点直接报错，`/api/health` 会给出中文诊断） |
+| 账号 | 应用用 `chat_app`，只有 `SELECT/INSERT/UPDATE/DELETE ON chat_mini.*`；建表用 root 跑 `scripts/schema.sql` |
+| 备份 | `mysqldump chat_mini > backup.sql` |
+| 时区 | 连接池 `timezone: "Z"`，**业务代码禁止 `NOW()`**，时间一律从 JS 传 `new Date()` |
+| 连接池 | 挂 `globalThis`，否则 dev 热重载会不断新建池吃满连接数 |
+
+---
+
+## 12. 实施阶段
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| **P1** | 建库建表 + 连接层 + 健康检查 | ✅ **已完成** |
+| P2 | 注册/登录/登出/me + `/login` 页面 + 首页守卫 + 命令行建号脚本 | 待做 |
+| P3 | 会话/消息 CRUD（带 `user_id` 隔离）+ 搜索 | 待做 |
+| P4 | 生成端改造（服务端取历史 + 秒级落盘 + 启动清理 running） | 待做 |
+| P5 | 前端接入（服务端为真相 + 本地缓存降级） | 待做 |
+| P6 | 回归 7 个 e2e + 新增认证/越权/重启 3 个 | 待做 |
+
+### P1 验收证据
+
+```
+/api/health → HTTP 200
+{ ok: true, db: { connected: true, version: "9.4.0", database: "chat_mini", tables: 5 } }
+
+scripts/selfcheck.sql:
+  1. 5 张表存在
+  2. 中文注释正常（UTF-8）
+  3. 插入/读取 seq 1,2 正常
+  4. ngram 中文检索：搜「服务端」命中 ✅
+  5. 级联删除：删用户 → 会话/消息归零
+  6. 唯一约束 (session_id, seq)：重复插入 → ERROR 1062 ✅
+  7. 清理后 5 张表全部 0 行
+
+权限越界自检：CREATE TABLE → ERROR 1142 CREATE command denied ✅
+```
+
+---
+
+## 13. 风险与回退
+
+| 风险 | 应对 |
+|---|---|
+| MySQL 没起来 → 站点打不开 | `/api/health` 明确中文诊断；README 写 `net start MySQL94` |
+| 前端改造面大（`use-chat.ts` 489 行） | 对外接口不变，只换内部；逐阶段灰度 |
+| 流式落盘频繁写 | 1 秒节流，内容未变不写 |
+| 忘记密码 | 管理员用 `scripts/create-user.mjs --reset` 重置，无自助找回 |
+| 想换 Postgres | SQL 全部收在 `db.ts` 之上的一层；方言差异（自增、`ON DUPLICATE KEY`）集中处理 |
+
+---
+
+## 14. 已知坑（实施时踩到的）
+
+1. **InnoDB 全文索引只在事务提交时更新**：未提交事务里 `MATCH ... AGAINST` 搜不到刚插入的行。验证必须在 `COMMIT` 之后。
+2. **`mysql2` 的 `ExecuteValues` 类型不接受 `unknown[]`**：参数类型要写成具体联合（`string | number | Date | null | Buffer …`），`undefined` 会让预处理语句参数数量不匹配，用 `null`。
+3. **PowerShell 控制台的 UTF-8 显示**：中文注释显示乱码可能只是控制台编码，查库里实际字节再下结论。
+
+---
+
+## 15. 将来可能做
+
+- 登录设备管理 UI（踢设备）已有后端支持
+- 会话全文搜索高亮、按时间范围过滤
+- 消息编辑历史（当前是覆盖）
+- 生成任务落盘策略升级：把压缩后的快照写库，实现跨重启的近似续传
+- 数据导出（Markdown / JSON）

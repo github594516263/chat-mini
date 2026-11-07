@@ -3,6 +3,8 @@
 一个最小 LLM 聊天站：**Next 16 + Tailwind v4 + streamdown + 自研 NDJSON 事件协议**。
 没有 zustand，没有 tanstack-query，没有 AI SDK——所有链路都在你自己的代码里。
 
+> 正在把状态层从浏览器搬到 MySQL + 加登录。设计、决策记录、各阶段验收标准见 **[DESIGN.md](DESIGN.md)**。
+
 核心链路 6 个文件、约 500 行（含注释，`cloc` 口径下更少）：
 
 | 部分 | 行数 |

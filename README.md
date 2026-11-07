@@ -58,6 +58,19 @@ node scripts/create-user.mjs 你的用户名
 ```bash
 curl http://localhost:3000/api/health     # 数据库连上了吗、表建齐了吗
 node scripts/e2e-auth.mjs                 # 16 项认证检查（登录/登出/限流/CSRF/越权报文）
+node scripts/e2e-sessions-api.mjs         # 23 项会话接口检查（隔离/分页/搜索/软删）
+```
+
+会话与消息接口（都要登录，全部按 `user_id` 隔离，越权一律 404）：
+
+```
+GET    /api/sessions?limit=&cursor=        列表（游标分页，按 updatedAt 倒序）
+POST   /api/sessions                       新建
+GET    /api/sessions/:id                   单个
+PATCH  /api/sessions/:id                   改名
+DELETE /api/sessions/:id                   软删除（数据留在库里，deleted_at 有值）
+GET    /api/sessions/:id/messages          消息（?afterSeq= 取增量）
+GET    /api/sessions/search?q=             标题 LIKE + 正文 ngram 全文索引
 ```
 
 **游客模式**：不登录也能正常聊天，对话只存在这台电脑的浏览器里；登录后看到的是账号里的数据。

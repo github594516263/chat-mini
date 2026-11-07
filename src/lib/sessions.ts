@@ -12,6 +12,12 @@ export type ChatUIMessage = {
   error?: string;
   stopped?: boolean;
   pending?: boolean;
+  /** 生成中断（刷新/断网/服务端 run 过期），可点「继续生成」接上 */
+  interrupted?: boolean;
+  /** 服务端 run 的 id：刷新后靠它续传 */
+  runId?: string;
+  /** 已经消费到的事件 seq：和 content 一起落盘，续传时作为 afterSeq */
+  appliedSeq?: number;
 };
 
 export type ChatSession = {
@@ -57,9 +63,24 @@ function isMessage(value: unknown): value is ChatUIMessage {
   if (typeof m.id !== "string") return false;
   if (m.role !== "user" && m.role !== "assistant") return false;
   if (typeof m.content !== "string") return false;
-  // 生成到一半被刷新留下的空壳，不值得恢复
-  if (m.role === "assistant" && !m.content.trim() && !m.thinking) return false;
+  // 生成到一半被刷新留下的空壳：有 runId 的留着（回来能续），没有的直接丢
+  if (m.role === "assistant" && !m.content.trim() && !m.thinking && typeof m.runId !== "string") {
+    return false;
+  }
   return true;
+}
+
+/**
+ * 读盘时的状态归一：
+ * - pending 但没有 runId（旧版本残留 / 刷新时还没拿到 runId）→ 标成"生成中断"
+ * - pending 且有 runId → 原样保留，交给 use-chat 去续传
+ */
+function normalizeMessage(message: ChatUIMessage): ChatUIMessage {
+  if (message.role !== "assistant") return message;
+  if (message.pending && typeof message.runId !== "string") {
+    return { ...message, pending: false, interrupted: true };
+  }
+  return message;
 }
 
 function isSession(value: unknown): value is ChatSession {
@@ -84,7 +105,7 @@ export function loadStore(): ChatStore {
               title: typeof session.title === "string" && session.title ? session.title : UNTITLED,
               createdAt: Number(session.createdAt) || Date.now(),
               updatedAt: Number(session.updatedAt) || Date.now(),
-              messages: session.messages.filter(isMessage),
+              messages: session.messages.filter(isMessage).map(normalizeMessage),
             }))
           : [];
         const activeId =
@@ -99,7 +120,7 @@ export function loadStore(): ChatStore {
     const legacy = window.localStorage.getItem(LEGACY_MESSAGES_KEY);
     if (legacy) {
       const parsed: unknown = JSON.parse(legacy);
-      const messages = Array.isArray(parsed) ? parsed.filter(isMessage) : [];
+      const messages = Array.isArray(parsed) ? parsed.filter(isMessage).map(normalizeMessage) : [];
       window.localStorage.removeItem(LEGACY_MESSAGES_KEY);
       if (messages.length > 0) {
         const firstUser = messages.find((m) => m.role === "user");

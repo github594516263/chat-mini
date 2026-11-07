@@ -38,6 +38,7 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 - 流式对话（真模型 / 假数据流一键切换）
 - 停止生成（AbortController 一路断到 provider）
 - **多会话**：侧栏列表、切换、删除、标题自动取首条消息；`localStorage` 持久化，刷新不丢
+- **断线续传**：生成跑在服务端，刷新/断网/切标签页回来能接着续（按 `seq` 水位补发，不重头不重复）
 - **会话管理**：搜索（按标题，实时过滤）、重命名（双击标题或点铅笔，Enter 保存 / Esc 取消，改名不改变排序）
 - **消息动作**：复制、重新生成、编辑重发（改掉用户消息后从那里重新流，之后的回答会被丢弃）
 - 思维链单独折叠（配 `DEEPSEEK_MODEL=deepseek-reasoner` 就能看到真的）
@@ -57,16 +58,23 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 
 ![深色主题](docs/theme-dark.png)
 
+生成被中断时会明确标注，并给「继续生成」接着写（输出仍落在同一条气泡里）：
+
+![生成中断](docs/interrupted.png)
+
 ## 文件地图
 
 | 文件 | 干什么 |
 | --- | --- |
-| `src/app/api/chat/route.ts` | 唯一后端入口：选 provider、给事件打 seq、按行编码进 ReadableStream |
+| `src/app/api/chat/route.ts` | 建 run：立刻返回 `runId`，生成在服务端后台继续跑 |
+| `src/app/api/chat/stream/route.ts` | 订阅 run：`?runId=&afterSeq=` 先回放再实时推 |
+| `src/app/api/chat/cancel/route.ts` | 停掉服务端生成（否则"停止"只是不看了，token 还在烧） |
+| `src/lib/runs.ts` | 进程内 run 表：事件缓冲、订阅广播、按 seq 压缩成快照、TTL 清理 |
 | `src/lib/protocol.ts` | 事件类型 + 编解码 + 上行报文清洗 |
 | `src/lib/providers/fake.ts` | 假数据流（带 think_delta、表格、代码块） |
 | `src/lib/providers/deepseek.ts` | 真数据流：把 DeepSeek 的 SSE 翻译成我们自己的事件（支持 `DEEPSEEK_BASE_URL`） |
-| `src/lib/sessions.ts` | 会话存储层：读写 localStorage、标题派生、旧版单会话数据迁移 |
-| `src/lib/use-chat.ts` | 会话 + 流式的唯一状态源：切会话时 abort，事件回填绑定 sessionId；`regenerate` / `editAndResend` 复用同一个 `streamInto` |
+| `src/lib/sessions.ts` | 会话存储层：读写 localStorage、标题派生、旧版数据迁移、`pending` 状态归一 |
+| `src/lib/use-chat.ts` | 会话 + 生成的唯一状态源：建 run、按 seq 消费、刷新后按水位续传；`send/regenerate/editAndResend/continueGeneration` 共用一条 `startRun` |
 | `src/components/sidebar.tsx` | 会话列表：新建 / 切换 / 删除 / 搜索 / 重命名 / 自动标题 |
 | `src/lib/theme.ts` | 主题三态：读写偏好、解析 system、首屏内联脚本字符串 |
 | `src/lib/use-theme.ts` | 主题状态 hook：挂载读偏好、监听系统配色、只改 `<html class>` |
@@ -84,10 +92,30 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 {"seq":321,"type":"completed","finish_reason":"stop"}
 ```
 
-- `seq` 单调递增，前端用 `if (event.seq <= lastSeq) continue` 做幂等，天然抗重复投递，也是将来做断线补读的钩子。
+- `seq` 单调递增，前端用 `if (event.seq <= lastSeq) continue` 做幂等，天然抗重复投递——断线续传就是靠它。
+- 还有一个覆盖式事件 `{"type":"sync","seq":602,"content":"…","thinking":""}`：服务端把旧事件压缩后，用它把正文一次性对齐。
 - 想加新事件（`rag_search` / `file_proc` / `tool_call` …）只改 `protocol.ts` 的联合类型 + 两处 switch，别的地方不用动。
 
-## 两个踩过的坑（改配置时别踩回去）
+## 生成为什么不是"一条普通请求"
+
+如果生成寄生在 `fetch` 的那条连接上，用户一刷新，连接断 → 服务端 `ReadableStream` 被 cancel → 上游 abort → **生成直接死掉**，界面上只剩半截（内容其实还在，只是没人生成了）。
+
+所以这里把生成拆成"任务 + 订阅"：
+
+```
+POST /api/chat                    建 run，立刻返回 { runId }，生成在服务端继续跑
+GET  /api/chat/stream?runId&afterSeq   订阅：回放 afterSeq 之后的事件，再实时推
+POST /api/chat/cancel             真正停掉服务端生成
+```
+
+客户端把 `runId + appliedSeq` 和正文写在**同一条消息里**（同一次 `saveStore` 落盘，所以水位不会和正文脱节）。刷新后带着 `afterSeq` 重连，服务端只补发没消费过的事件 —— 视觉上是同一段文字**继续往下长**，不重头、不重复。
+
+代价（都在 `src/lib/runs.ts` 顶部注明）：
+- run 存在**进程内存**里：单机 `next start` / Docker 可用；Serverless 不好使；多实例要换 Redis
+- **dev 热重载会重置 run**，开发时改代码正在跑的那条会丢（生产没这问题）
+- 结束的 run 保留 10 分钟（TTL），过期后再刷新就降级为"生成中断 + 继续生成"
+
+## 三个踩过的坑（改配置时别踩回去）
 
 1. **Tailwind v4 不扫描 `node_modules`**，而 streamdown 的默认组件把样式写成类名放在 dist 里。
    所以 `globals.css` 里必须有 `@source "../../node_modules/streamdown/dist";`，否则 markdown 会静默掉一部分样式。
@@ -114,6 +142,12 @@ node scripts/e2e-sidebar.mjs
 
 # 端到端（主题）：首屏不闪白 / 三态切换 / 持久化 / 代码高亮跟随 / 手动压过系统
 node scripts/e2e-theme.mjs
+
+# 端到端（断线续传）：中途刷新继续增长 / 不重复 / 停止真生效 / run 过期降级 / 继续生成
+node scripts/e2e-resume.mjs
+
+# 服务端探针：run 回放、水位、压缩(sync)、取消、404（不需要浏览器）
+node scripts/probe-runs.mjs
 ```
 
 脚本都可配 `CDP_PORT` / `BASE_URL`，并且都要求先起一个带调试端口的 Chrome：

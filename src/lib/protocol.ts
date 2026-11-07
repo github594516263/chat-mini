@@ -10,7 +10,12 @@ export type ChatEvent =
   | { type: "think_delta"; delta: string }
   | { type: "usage"; prompt_tokens: number; completion_tokens: number }
   | { type: "completed"; finish_reason: "stop" | "length" | "aborted" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /**
+   * 续传快照：服务端把旧事件压缩后，用一个"覆盖式"事件把已有正文一次性给客户端。
+   * 客户端收到它就整体替换 content/thinking，而不是往后追加。
+   */
+  | { type: "sync"; content: string; thinking: string };
 
 export type SeqEvent = ChatEvent & { seq: number };
 

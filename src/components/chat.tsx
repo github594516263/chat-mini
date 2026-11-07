@@ -49,6 +49,7 @@ export default function Chat({ live }: { live: boolean }) {
     stop,
     regenerate,
     editAndResend,
+    continueGeneration,
     newSession,
     selectSession,
     deleteSession,
@@ -83,6 +84,17 @@ export default function Chat({ live }: { live: boolean }) {
     setEditingId(null);
     setDraft("");
   }, [activeId]);
+
+  // 生成中刷新/关页面会中断，浏览器拦一下（内容不会丢，但生成会停）
+  useEffect(() => {
+    if (!streaming) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [streaming]);
 
   function submit() {
     if (streaming || !input.trim()) return;
@@ -190,6 +202,7 @@ export default function Chat({ live }: { live: boolean }) {
                     void editAndResend(id, text);
                   }}
                   onRegenerate={(id) => void regenerate(id)}
+                  onContinue={(id) => void continueGeneration(id)}
                 />
               ))}
               <div ref={bottomRef} className="h-px" />
@@ -278,6 +291,7 @@ type BubbleProps = {
   onEditCancel: () => void;
   onEditSubmit: (id: string, text: string) => void;
   onRegenerate: (id: string) => void;
+  onContinue: (id: string) => void;
 };
 
 function Bubble({
@@ -290,6 +304,7 @@ function Bubble({
   onEditCancel,
   onEditSubmit,
   onRegenerate,
+  onContinue,
 }: BubbleProps) {
   if (message.role === "user") {
     if (editing) {
@@ -406,6 +421,22 @@ function Bubble({
 
       {message.stopped && !message.error ? (
         <p className="text-xs text-muted-foreground">已停止生成</p>
+      ) : null}
+
+      {message.interrupted && !message.error ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          <span>生成中断（刷新或断网时只输出到这里）</span>
+          {message.content.trim() ? (
+            <button
+              type="button"
+              onClick={() => onContinue(message.id)}
+              disabled={streaming}
+              className="rounded-md bg-amber-500/15 px-2 py-0.5 font-medium transition-colors hover:bg-amber-500/25 disabled:opacity-40"
+            >
+              继续生成
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       <div className="flex items-center gap-0.5 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, PanelLeft, Square } from "lucide-react";
+import { ArrowUp, Check, Copy, PanelLeft, Pencil, RotateCcw, Square } from "lucide-react";
 import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
 
@@ -33,6 +33,9 @@ const SUGGESTIONS = [
   "这段话帮我翻译成英文：把协议握在自己手里",
 ];
 
+const ACTION_BTN =
+  "flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
+
 export default function Chat({ live }: { live: boolean }) {
   const {
     sessions,
@@ -42,13 +45,19 @@ export default function Chat({ live }: { live: boolean }) {
     streaming,
     send,
     stop,
+    regenerate,
+    editAndResend,
     newSession,
     selectSession,
     deleteSession,
+    renameSession,
   } = useChat();
 
   const [input, setInput] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -64,9 +73,11 @@ export default function Chat({ live }: { live: boolean }) {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
-  // 切会话回到顶部时重置输入框高度
+  // 切会话时清空输入框与编辑态
   useEffect(() => {
     setInput("");
+    setEditingId(null);
+    setDraft("");
   }, [activeId]);
 
   function submit() {
@@ -78,7 +89,6 @@ export default function Chat({ live }: { live: boolean }) {
 
   return (
     <div className="flex h-dvh overflow-hidden bg-background">
-      {/* 桌面端常驻侧栏 */}
       <div className="hidden md:block">
         <Sidebar
           sessions={sessions}
@@ -86,11 +96,11 @@ export default function Chat({ live }: { live: boolean }) {
           onSelect={selectSession}
           onNew={newSession}
           onDelete={deleteSession}
+          onRename={renameSession}
           live={live}
         />
       </div>
 
-      {/* 移动端：抽屉 + 遮罩 */}
       {sidebarOpen ? (
         <div className="fixed inset-0 z-30 flex md:hidden">
           <Sidebar
@@ -105,6 +115,7 @@ export default function Chat({ live }: { live: boolean }) {
               setSidebarOpen(false);
             }}
             onDelete={deleteSession}
+            onRename={renameSession}
             live={live}
           />
           <button
@@ -153,7 +164,28 @@ export default function Chat({ live }: { live: boolean }) {
           ) : (
             <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
               {messages.map((message) => (
-                <Bubble key={message.id} message={message} streaming={streaming} />
+                <Bubble
+                  key={message.id}
+                  message={message}
+                  streaming={streaming}
+                  editing={editingId === message.id}
+                  draft={draft}
+                  onDraftChange={setDraft}
+                  onEditStart={(target) => {
+                    setEditingId(target.id);
+                    setDraft(target.content);
+                  }}
+                  onEditCancel={() => {
+                    setEditingId(null);
+                    setDraft("");
+                  }}
+                  onEditSubmit={(id, text) => {
+                    setEditingId(null);
+                    setDraft("");
+                    void editAndResend(id, text);
+                  }}
+                  onRegenerate={(id) => void regenerate(id)}
+                />
               ))}
               <div ref={bottomRef} className="h-px" />
             </div>
@@ -174,7 +206,7 @@ export default function Chat({ live }: { live: boolean }) {
                   }
                 }}
                 rows={1}
-                placeholder="给 chat-mini 发送消息（Enter 发送，Shift+Enter 换行）"
+                placeholder="给 chat-mini 发送消息…"
                 className="max-h-[200px] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
               />
               <button
@@ -197,7 +229,9 @@ export default function Chat({ live }: { live: boolean }) {
               </button>
             </div>
             <p className="mt-2 text-center text-[11px] text-muted-foreground">
-              内容由 AI 生成，请自行核对 · 自研 NDJSON 事件协议
+              内容由 AI 生成，请自行核对
+              <span className="hidden sm:inline"> · Enter 发送，Shift+Enter 换行</span>
+              <span className="hidden md:inline"> · 自研 NDJSON 事件协议</span>
             </p>
           </div>
         </div>
@@ -229,12 +263,95 @@ function Hero({ onPick }: { onPick: (text: string) => void }) {
   );
 }
 
-function Bubble({ message, streaming }: { message: ChatUIMessage; streaming: boolean }) {
+type BubbleProps = {
+  message: ChatUIMessage;
+  streaming: boolean;
+  editing: boolean;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onEditStart: (message: ChatUIMessage) => void;
+  onEditCancel: () => void;
+  onEditSubmit: (id: string, text: string) => void;
+  onRegenerate: (id: string) => void;
+};
+
+function Bubble({
+  message,
+  streaming,
+  editing,
+  draft,
+  onDraftChange,
+  onEditStart,
+  onEditCancel,
+  onEditSubmit,
+  onRegenerate,
+}: BubbleProps) {
   if (message.role === "user") {
+    if (editing) {
+      return (
+        <div className="flex justify-end">
+          <div className="w-full max-w-[85%] rounded-2xl border border-primary/50 bg-muted p-2">
+            <textarea
+              // biome-ignore lint/a11y/noAutofocus: 进入编辑态就该直接能打字
+              autoFocus
+              value={draft}
+              onChange={(event) => onDraftChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onEditCancel();
+                }
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  if (draft.trim()) onEditSubmit(message.id, draft);
+                }
+              }}
+              rows={3}
+              className="w-full resize-none bg-transparent px-2 py-1.5 text-[15px] leading-7 outline-none"
+            />
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <span className="mr-auto pl-2 text-[11px] text-muted-foreground">
+                Ctrl/⌘+Enter 重发 · Esc 取消
+              </span>
+              <button
+                type="button"
+                onClick={onEditCancel}
+                className="rounded-lg px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => onEditSubmit(message.id, draft)}
+                disabled={!draft.trim()}
+                className="rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                保存并重发
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
-      <div className="flex justify-end">
+      <div className="group flex flex-col items-end gap-1">
         <div className="max-w-[85%] whitespace-pre-wrap rounded-3xl bg-muted px-4 py-2.5 text-[15px] leading-7">
           {message.content}
+        </div>
+        <div className="flex items-center gap-0.5 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
+          <CopyButton text={message.content} />
+          <button
+            type="button"
+            onClick={() => onEditStart(message)}
+            disabled={streaming}
+            aria-label="编辑这条消息"
+            title="编辑重发"
+            className={ACTION_BTN}
+          >
+            <Pencil size={12} />
+            编辑
+          </button>
         </div>
       </div>
     );
@@ -244,12 +361,11 @@ function Bubble({ message, streaming }: { message: ChatUIMessage; streaming: boo
   const empty = !message.content && !message.thinking && !message.error;
 
   return (
-    <div className="space-y-2">
+    <div className="group space-y-2">
       {message.thinking ? (
-        <details className="group rounded-xl border border-border bg-muted/40 px-3 py-2">
+        <details className="rounded-xl border border-border bg-muted/40 px-3 py-2">
           <summary className="cursor-pointer list-none text-xs font-medium text-muted-foreground select-none">
             思考过程
-            <span className="ml-1 inline-block transition-transform group-open:rotate-90">›</span>
           </summary>
           <div className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-muted-foreground">
             {message.thinking}
@@ -287,11 +403,46 @@ function Bubble({ message, streaming }: { message: ChatUIMessage; streaming: boo
         <p className="text-xs text-muted-foreground">已停止生成</p>
       ) : null}
 
-      {message.usage ? (
-        <p className="text-[11px] text-muted-foreground tabular-nums">
-          ↑ {message.usage.prompt_tokens} · ↓ {message.usage.completion_tokens} tokens
-        </p>
-      ) : null}
+      <div className="flex items-center gap-0.5 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100">
+        {message.content ? <CopyButton text={message.content} /> : null}
+        <button
+          type="button"
+          onClick={() => onRegenerate(message.id)}
+          disabled={streaming || empty}
+          aria-label="重新生成"
+          title="重新生成"
+          className={ACTION_BTN}
+        >
+          <RotateCcw size={12} />
+          重新生成
+        </button>
+        {message.usage ? (
+          <span className="ml-1 text-[11px] text-muted-foreground tabular-nums">
+            ↑ {message.usage.prompt_tokens} · ↓ {message.usage.completion_tokens}
+          </span>
+        ) : null}
+      </div>
     </div>
+  );
+}
+
+function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 非安全上下文 / 无权限：静默失败
+    }
+  }
+
+  return (
+    <button type="button" onClick={copy} aria-label={label} title={label} className={ACTION_BTN}>
+      {copied ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
+      {copied ? "已复制" : label}
+    </button>
   );
 }

@@ -38,11 +38,19 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 - 流式对话（真模型 / 假数据流一键切换）
 - 停止生成（AbortController 一路断到 provider）
 - **多会话**：侧栏列表、切换、删除、标题自动取首条消息；`localStorage` 持久化，刷新不丢
+- **会话管理**：搜索（按标题，实时过滤）、重命名（双击标题或点铅笔，Enter 保存 / Esc 取消，改名不改变排序）
+- **消息动作**：复制、重新生成、编辑重发（改掉用户消息后从那里重新流，之后的回答会被丢弃）
 - 思维链单独折叠（配 `DEEPSEEK_MODEL=deepseek-reasoner` 就能看到真的）
 - Markdown 全支持：表格 / 代码高亮 / 引用 / 列表，代码块自带复制下载
 - token 用量显示（真实 usage，不是估算）
 
-![多会话](docs/sessions.png)
+![消息动作条](docs/actions.png)
+
+搜索与重命名：
+
+| 搜索 | 重命名 |
+| --- | --- |
+| ![搜索](docs/sidebar-search.png) | ![重命名](docs/sidebar-rename.png) |
 
 ## 文件地图
 
@@ -53,9 +61,9 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 | `src/lib/providers/fake.ts` | 假数据流（带 think_delta、表格、代码块） |
 | `src/lib/providers/deepseek.ts` | 真数据流：把 DeepSeek 的 SSE 翻译成我们自己的事件（支持 `DEEPSEEK_BASE_URL`） |
 | `src/lib/sessions.ts` | 会话存储层：读写 localStorage、标题派生、旧版单会话数据迁移 |
-| `src/lib/use-chat.ts` | 会话 + 流式的唯一状态源：切会话时 abort，事件回填绑定 sessionId |
-| `src/components/sidebar.tsx` | 会话列表：新建 / 切换 / 删除 / 自动标题 |
-| `src/components/chat.tsx` | 界面：空态、消息流、输入框、停止按钮、移动端抽屉 |
+| `src/lib/use-chat.ts` | 会话 + 流式的唯一状态源：切会话时 abort，事件回填绑定 sessionId；`regenerate` / `editAndResend` 复用同一个 `streamInto` |
+| `src/components/sidebar.tsx` | 会话列表：新建 / 切换 / 删除 / 搜索 / 重命名 / 自动标题 |
+| `src/components/chat.tsx` | 界面：空态、消息流、动作条、编辑重发、输入框、移动端抽屉 |
 | `src/app/globals.css` | 设计令牌（shadcn 语义命名）+ Tailwind v4 配置 |
 | `src/app/preview/page.tsx` | 渲染自检页：固定 markdown，用来看 streamdown 样式对不对 |
 
@@ -84,11 +92,17 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 # 无头 Chrome + CDP，抓页面 console，排查"样式在但交互没反应"这类问题
 node scripts/probe-console.mjs http://127.0.0.1:3123/preview 15
 
-# 端到端：清历史 → 点建议 → 发送 → 采样确认内容在流式增长 → 刷新验证持久化 → 截图
-node scripts/e2e-chat.mjs ./shots    # 可配 CDP_PORT / BASE_URL
+# 端到端（多会话）：清历史 → 发送确认流式增长 → 新对话 → 切回 → 刷新验证持久化 → 删除
+node scripts/e2e-chat.mjs ./shots
+
+# 端到端（消息动作）：重新生成 / 编辑重发 / 复制（会注入可控剪贴板）
+node scripts/e2e-actions.mjs
+
+# 端到端（侧栏）：搜索 / 空结果 / 清空 / 重命名 / Esc 取消 / 刷新保持 / 顺序不变
+node scripts/e2e-sidebar.mjs
 ```
 
-两者都要求先起一个带调试端口的 Chrome：
+脚本都可配 `CDP_PORT` / `BASE_URL`，并且都要求先起一个带调试端口的 Chrome：
 
 ```bash
 chrome --headless=new --remote-debugging-port=9223 --user-data-dir=/tmp/cdp about:blank
@@ -96,8 +110,7 @@ chrome --headless=new --remote-debugging-port=9223 --user-data-dir=/tmp/cdp abou
 
 ## 下一步可以加什么
 
-- 会话重命名 / 置顶 / 搜索（现在标题自动取首条消息，不能改）
-- 停止后保留半截回答 + 重新生成按钮
-- 消息级操作条：复制、编辑重发、重新生成
-- 事件补全：`rag_search` / `file_proc` / `compact_done`（想复刻目标站的"流过程"体验时再加）
 - 暗色手动切换（现在跟随系统）
+- 会话置顶 / 按标题或内容全文搜索（现在只按标题前缀式包含匹配）
+- 消息级"从这里分支"（现在是编辑即截断，多分支要另存会话）
+- 事件补全：`rag_search` / `file_proc` / `compact_done`（想复刻目标站的"流过程"体验时再加）

@@ -154,27 +154,22 @@ export function useChat() {
     [],
   );
 
-  const send = useCallback(
-    async (text: string) => {
-      const content = text.trim();
-      if (!content || abortRef.current) return;
-
-      const { sessions: currentSessions, activeId: currentActiveId } = stateRef.current;
-      const session = currentSessions.find((s) => s.id === currentActiveId);
-      if (!session) return;
-
-      const sessionId = session.id;
-      const userMessage: ChatUIMessage = { id: newId(), role: "user", content };
-      const assistantId = newId();
-      const history = [...session.messages, userMessage];
-
+  /** 重命名：不改 updatedAt，避免仅仅改个名字就把会话顶到列表最前 */
+  const renameSession = useCallback(
+    (sessionId: string, title: string) => {
+      const next = title.replace(/\s+/g, " ").trim();
+      if (!next) return;
       updateSession(sessionId, (s) => ({
         ...s,
-        title: s.messages.length === 0 ? deriveTitle(content) : s.title,
-        updatedAt: Date.now(),
-        messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
+        title: next.length > 40 ? `${next.slice(0, 40)}…` : next,
       }));
+    },
+    [updateSession],
+  );
 
+  /** 把一段历史发出去并把事件流回填到 assistantId 这条消息上 */
+  const streamInto = useCallback(
+    async (sessionId: string, history: ChatUIMessage[], assistantId: string) => {
       const payload: WireMessage[] = history.map((m) => ({ role: m.role, content: m.content }));
       const controller = new AbortController();
       abortRef.current = controller;
@@ -235,6 +230,92 @@ export function useChat() {
     [applyEvent, patchMessage, updateSession],
   );
 
+  /** 取当前会话 + 某个消息的下标，其它动作都基于它 */
+  const locate = useCallback((messageId: string) => {
+    const { sessions: currentSessions, activeId: currentActiveId } = stateRef.current;
+    const session = currentSessions.find((s) => s.id === currentActiveId);
+    if (!session) return null;
+    const index = session.messages.findIndex((m) => m.id === messageId);
+    if (index < 0) return null;
+    return { session, index };
+  }, []);
+
+  const send = useCallback(
+    async (text: string) => {
+      const content = text.trim();
+      if (!content || abortRef.current) return;
+
+      const { sessions: currentSessions, activeId: currentActiveId } = stateRef.current;
+      const session = currentSessions.find((s) => s.id === currentActiveId);
+      if (!session) return;
+
+      const sessionId = session.id;
+      const userMessage: ChatUIMessage = { id: newId(), role: "user", content };
+      const assistantId = newId();
+      const history = [...session.messages, userMessage];
+
+      updateSession(sessionId, (s) => ({
+        ...s,
+        title: s.messages.length === 0 ? deriveTitle(content) : s.title,
+        updatedAt: Date.now(),
+        messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
+      }));
+
+      await streamInto(sessionId, history, assistantId);
+    },
+    [streamInto, updateSession],
+  );
+
+  /** 重新生成：丢掉这条助手消息，用它前面最近的那条用户消息重发 */
+  const regenerate = useCallback(
+    async (assistantMessageId: string) => {
+      if (abortRef.current) return;
+      const located = locate(assistantMessageId);
+      if (!located) return;
+
+      const { session, index } = located;
+      let userIndex = index - 1;
+      while (userIndex >= 0 && session.messages[userIndex].role !== "user") userIndex -= 1;
+      if (userIndex < 0) return;
+
+      const history = session.messages.slice(0, userIndex + 1);
+      const assistantId = newId();
+      updateSession(session.id, (s) => ({
+        ...s,
+        updatedAt: Date.now(),
+        messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
+      }));
+
+      await streamInto(session.id, history, assistantId);
+    },
+    [locate, streamInto, updateSession],
+  );
+
+  /** 编辑重发：改掉那条用户消息，把它之后的全部内容丢弃后重发 */
+  const editAndResend = useCallback(
+    async (userMessageId: string, text: string) => {
+      const content = text.trim();
+      if (!content || abortRef.current) return;
+      const located = locate(userMessageId);
+      if (!located) return;
+
+      const { session, index } = located;
+      const edited: ChatUIMessage = { ...session.messages[index], content };
+      const history = [...session.messages.slice(0, index), edited];
+      const assistantId = newId();
+
+      updateSession(session.id, (s) => ({
+        ...s,
+        title: index === 0 ? deriveTitle(content) : s.title,
+        updatedAt: Date.now(),
+        messages: [...history, { id: assistantId, role: "assistant", content: "", pending: true }],
+      }));
+
+      await streamInto(session.id, history, assistantId);
+    },
+    [locate, streamInto, updateSession],
+  );
+
   return {
     sessions: ordered,
     activeId,
@@ -244,8 +325,11 @@ export function useChat() {
     hydrated,
     send,
     stop,
+    regenerate,
+    editAndResend,
     newSession,
     selectSession,
     deleteSession,
+    renameSession,
   };
 }

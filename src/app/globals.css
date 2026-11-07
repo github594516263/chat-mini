@@ -1,0 +1,133 @@
+@import "tailwindcss";
+@import "streamdown/styles.css";
+
+/*
+ * Tailwind v4 默认不扫描 node_modules，但 streamdown 的默认组件把样式写成
+ * Tailwind 类名放在 dist 里（bg-sidebar / divide-border / rounded-md …）。
+ * 不显式 @source 的话这些类不会被生成，markdown 会静默掉样式。
+ */
+@source "../../node_modules/streamdown/dist";
+@source "../../node_modules/@streamdown/code/dist";
+
+/*
+ * 设计令牌：刻意采用 shadcn 的语义命名（background/foreground/muted/border/primary/sidebar）。
+ * 原因：streamdown 的默认组件内部就用这组类名，令牌名一致才能直接吃到它的排版。
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #17181a;
+  --card: #ffffff;
+  --card-foreground: #17181a;
+  --popover: #ffffff;
+  --popover-foreground: #17181a;
+  --primary: #4d6bfe;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f3f5;
+  --secondary-foreground: #17181a;
+  --muted: #f5f5f6;
+  --muted-foreground: #8b8d93;
+  --accent: #f2f3f5;
+  --accent-foreground: #17181a;
+  --destructive: #e5484d;
+  --border: #e9e9ec;
+  --input: #e9e9ec;
+  --ring: #4d6bfe;
+  --sidebar: #fbfbfc;
+  --sidebar-foreground: #55575c;
+  --sidebar-border: #ececee;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #1b1b1d;
+    --foreground: #ececee;
+    --card: #232326;
+    --card-foreground: #ececee;
+    --popover: #232326;
+    --popover-foreground: #ececee;
+    --primary: #6b83ff;
+    --primary-foreground: #12121a;
+    --secondary: #2a2a2e;
+    --secondary-foreground: #ececee;
+    --muted: #262629;
+    --muted-foreground: #9a9ca2;
+    --accent: #2a2a2e;
+    --accent-foreground: #ececee;
+    --destructive: #ff6369;
+    --border: #313135;
+    --input: #313135;
+    --ring: #6b83ff;
+    --sidebar: #171719;
+    --sidebar-foreground: #a8aaaf;
+    --sidebar-border: #2a2a2e;
+  }
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--primary) 22%, transparent);
+}
+
+/* 细滚动条：官网形态的细节之一 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--foreground) 16%, transparent);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--foreground) 28%, transparent);
+  background-clip: content-box;
+}

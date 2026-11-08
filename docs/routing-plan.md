@@ -301,8 +301,61 @@ URL： 新建 → /c/<真id>；删除 → 立刻离开已删 id；后退不回�
 **已知小偏差**：切回某条会话时，草稿文本在，但光标落在末尾 —— 受控 textarea 换值的固有行为
 （要记住光标得自己存 `selectionStart`，判断不值得，已在测试里断言并注释）。
 
-**验收**：15/15（深链）+ 28/28（状态/零重建）+ 9/9（并发）+ 7/7（鉴权）
+**验收**：15/15（深链）+ 33/33（状态/零重建/骨架）+ 9/9（并发）+ 7/7（鉴权）
 + 21/21（服务端全链路）+ actions/resume/chat/sidebar 全通过。
+
+**冷会话加载态：改成骨架**（2026-11-08）
+- 原来加载中是整块区域换成一行「正在加载会话…」，数据到了再整块换回来 —— 观感就是"又刷新了一次"
+- 现在是与真实内容同尺寸的灰块骨架（`data-skeleton`），带 700ms 网络延迟下验证：骨架出现、那行字不再出现、消息到达后骨架撤掉
+- **明确不做"预热"**（用户判断没必要）：冷会话仍会发一次请求，只是这期间不再闪
+
+**骨架之前还会闪一下 Hero 空态 —— 已修**（同一个 bug 的第二层）
+- 原因：判断条件用了 `messagesLoading`，而它是在 **effect 里**才置 true 的。
+  切到冷会话的第一帧满足"messages 为空 + loading 还是 false"，于是先把 Hero 空态画出来，下一帧才切成骨架。
+- 修法：改用**渲染时同步可得**的 `session.loaded`（列表数据里就有），不再依赖 effect 时序：
+  ```tsx
+  const sessionPending = activeSession?.loaded === false;
+  const showSkeleton = !hydrated || sessionPending || (messagesLoading && messages.length === 0);
+  ```
+- 同时补一个坑：拉消息失败（网络/404）时也要把 `loaded` 置掉，否则界面永远停在骨架上等一个不会来的响应。
+- 实测日志（切向冷会话）：
+  ```
+  + 24ms  active=COLD loaded=false msgs=0 skel=true    ← 第一帧就是骨架
+  +757ms  active=COLD loaded=true  msgs=2 skel=false   ← 数据到了才换内容
+  ```
+
+**侧栏会话项改成真链接**（2026-11-08）
+- 对照 `vercel/ai-chatbot`：他们的会话项是 `<Link href={`/chat/${id}`}>`，我们是 `<button onClick>` + `router.push` —— 少了链接语义（中键新开、右键复制链接、拖拽）
+- 改法：`<Link href={sessionPath(id)} onClick={...}>`，**`onSelect` 只同步状态，URL 交给 href**（否则 Link 一次 + push 一次双跳）；已在当前会话上 `preventDefault()`，免得双击重命名时多压一条历史
+- 验收新增三条：侧栏项是 `<a>`、href 指向该会话、点击只留**一条**历史
+  （数历史别用 `history.length`，Chrome 把它封顶在 50，长会话页面里永远不动 —— 用 CDP `Page.getNavigationHistory` 数同名 URL）
+
+**两个实测纠正**（重要，写下来免得以后又凭直觉优化）：
+1. **`<Link>` 在我们这里不会预取**。dev 和生产构建下，页面稳定后 4 秒内 prefetch 请求数都是 **0**
+   —— 因为 `(chat)/layout.tsx` 是 `force-dynamic`，动态段没有可预取的静态部分。
+   所以 Link 换来的只有**语义**，没有速度。
+2. **URL 提交慢的真正开关是 `loading.tsx`**。加一个 `loading.tsx`（返回 `null`，零 UI 副作用）后，
+   生产构建 + 700ms 模拟延迟实测：
+
+   | 生产构建，700ms 模拟延迟 | 点侧栏后 URL 提交耗时 |
+   |---|---|
+   | 有 `loading.tsx` | **22ms** |
+   | 无 `loading.tsx` | **729ms** |
+
+   原因：有 Suspense 边界时 Next 可以先提交 URL、再流式等 RSC；没有就只能整段等回来。
+   注意这个差异在 **dev 里量不出来**（dev 下两种情况都是 ~760ms），必须打生产包才能看见。
+
+**顺手修的两个测试自身的坑**：
+- `aside button[data-session-id]` 选择器（会话项变成 `<a>` 后全部落空，表现为"侧栏空了"）
+- 游客套件没清 cookie：浏览器若带着登录态，侧栏读的是服务端会话，用例前提直接不成立
+
+**顺带实测到的一个机制（写测试时踩过）**：点侧栏切会话时，**内容是同步切换的**（activeId 立刻变），
+而 **URL 要等 RSC 回来才提交**（Next 把导航包在 transition 里）。所以骨架期恰好落在"URL 还没变"的那几百毫秒里 ——
+按 URL 过滤采样会把要测的窗口整段滤掉。这条也解释了为什么"地址栏稍慢半拍"是用眼睛看不出来的
+（加 `loading.tsx` 后这个窗口基本消失，见上表）。
+
+
+
 
 ---
 
@@ -320,3 +373,5 @@ URL： 新建 → /c/<真id>；删除 → 立刻离开已删 id；后退不回�
 | 2026-11-08 | 视图放 page 还是 layout | **layout**：放 page 会随参数变化被卸载重建（实测：放 layout 后 `<main>` 与输入框是同一个 DOM 节点） |
 | 2026-11-08 | 404 谁来判 | **客户端**：服务端 `notFound()` 会和 layout 里的界面同时出现，自相矛盾；改由 ChatShell 拉 `/api/sessions/[id]` 判 404 |
 | 2026-11-08 | 是否开 `cacheComponents` | **暂不开**：视图已上移，Activity 保活（3 条上限）收益被覆盖；PPR 外壳另算，等阶段 1 |
+| 2026-11-08 | 侧栏会话项用 `<Link>` 还是 `<button>` | **`<Link>`**：与官方模板一致，拿到链接语义；URL 由 href 提交，`onSelect` 只同步状态 |
+| 2026-11-08 | 要不要为 RSC 请求做 prefetch / staleTimes | **不做**：实测 `<Link>` 根本不预取（动态段），改这几行是无效劳动；真起作用的开关是 `loading.tsx`（22ms vs 729ms） |

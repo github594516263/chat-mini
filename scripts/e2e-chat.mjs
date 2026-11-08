@@ -37,6 +37,10 @@ ws.addEventListener("message", (event) => {
 
 await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 await call("Page.enable");
+await call("Network.enable");
+// 必须先把 cookie 清掉：这两个套件跑的是游客路径，若浏览器还带着登录态，
+// 侧栏读的会是服务端会话，整个用例的前提就不成立了（真实踩过）。
+await call("Network.clearBrowserCookies");
 await call("Runtime.enable");
 
 const evaluate = async (expression) => {
@@ -59,7 +63,7 @@ const snapshot = () =>
       sessionCount: parsed?.sessions?.length ?? 0,
       activeId: parsed?.activeId ?? null,
       titles: (parsed?.sessions ?? []).map((s) => s.title),
-      sidebarTitles: aside ? [...aside.querySelectorAll('button[data-session-id]')].map((b) => b.title) : [],
+      sidebarTitles: aside ? [...aside.querySelectorAll('[data-session-id]')].map((b) => b.title) : [],
       streaming: !!document.querySelector('button[aria-label="停止生成"]'),
       newChatBtn: !!document.querySelector('button[aria-label="新对话"]'),
     };
@@ -120,7 +124,7 @@ console.log(`6. 新对话: 空态=${afterNew.hero} 会话数=${afterNew.sessionC
 
 // 5) 切回第一个会话（新建的空会话排最前，取最后一个 = 刚才聊过的那条）
 const switched = await evaluate(`(() => {
-  const buttons = [...document.querySelectorAll('aside button[data-session-id]')];
+  const buttons = [...document.querySelectorAll('aside [data-session-id]')];
   const target = buttons[buttons.length - 1];
   if (!target) return 'no-session';
   target.click();
@@ -140,7 +144,7 @@ console.log(
 
 // 7) 删除当前会话
 const deletedActive = await evaluate(`(() => {
-  const active = document.querySelector('aside button[data-session-id]');
+  const active = document.querySelector('aside [data-session-id]');
   if (!active) return 'no-session';
   const row = active.closest('[data-session-row]');
   const btn = row?.querySelector('button[aria-label="删除会话"]');

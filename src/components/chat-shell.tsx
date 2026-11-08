@@ -61,13 +61,19 @@ export function ChatShell({
     router.replace("/");
   }, [user, chat.hydrated, chat.sessions, urlSessionId, router]);
 
+  /**
+   * 侧栏点选：这里**只同步状态**，不再自己 router.push。
+   *
+   * URL 交给侧栏那个 <Link> 负责（真链接 → 中键新开、复制链接、hover 预取都能用）。
+   * 如果这里再 push 一次，就是 Link 一次 + push 一次的双跳。
+   * 这么分工还有个好处：onClick 先同步把 activeId 换掉（内容立刻切），
+   * 紧接着 Link 提交 URL —— 手感和"本地状态切换"一样快，地址栏也不落后。
+   */
   const selectSession = useCallback(
     (sessionId: string) => {
       select(sessionId);
-      const target = sessionPath(sessionId);
-      if (window.location.pathname !== target) router.push(target);
     },
-    [select, router],
+    [select],
   );
 
   // 登录态下 URL 里的会话拉不到（404）→ 渲染 not-found 态，而不是装作一条空会话

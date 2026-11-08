@@ -906,14 +906,19 @@ export function useChat(
       setMessagesLoading(true);
       try {
         const messages = await refreshMessages(sessionId);
-        if (!messages) return;
+        if (!messages) {
+          // 拉失败（网络错误 / 404）：也要把 loaded 置掉，
+          // 否则界面会永远停在骨架屏上等着一个不会来的响应
+          updateSession(sessionId, (s) => (s.loaded === false ? { ...s, loaded: true } : s));
+          return;
+        }
         const streamingMessage = [...messages].reverse().find((m) => m.pending && m.runId);
         if (streamingMessage) resumeRun(sessionId, streamingMessage);
       } finally {
         setMessagesLoading(false);
       }
     },
-    [refreshMessages, resumeRun],
+    [refreshMessages, resumeRun, updateSession],
   );
 
   useEffect(() => {

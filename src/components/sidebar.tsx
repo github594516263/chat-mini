@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import {
   PanelLeftClose,
@@ -15,6 +16,7 @@ import {
 import { AccountPanel } from "@/components/account-panel";
 import type { SettingsSection } from "@/components/settings-dialog";
 import type { AccountUser } from "@/lib/account";
+import { sessionPath } from "@/lib/session-route";
 import type { ChatSession } from "@/lib/sessions";
 import { cn } from "@/lib/utils";
 
@@ -245,9 +247,15 @@ export function Sidebar({
                     isActive ? "bg-muted" : "hover:bg-muted/60",
                   )}
                 >
-                  <button
-                    type="button"
-                    onClick={() => onSelect(session.id)}
+                  {/* 真链接，不是 button：中键新开标签页、右键复制链接、hover 预取都靠它。
+                      onClick 只同步状态（内容立刻切），URL 由 href 提交。
+                      已经在当前会话上时 preventDefault，免得双击重命名时多压一条历史。 */}
+                  <Link
+                    href={sessionPath(session.id)}
+                    onClick={(event) => {
+                      if (window.location.pathname === sessionPath(session.id)) event.preventDefault();
+                      onSelect(session.id);
+                    }}
                     onDoubleClick={() => startRename(session)}
                     data-session-id={session.id}
                     title={session.title}
@@ -257,7 +265,7 @@ export function Sidebar({
                     )}
                   >
                     {session.title}
-                  </button>
+                  </Link>
                   <button
                     type="button"
                     onClick={() => startRename(session)}

@@ -118,6 +118,18 @@ export function ChatView() {
   //   游客：    runId + 已消费的水位存在 localStorage，刷新后从断点接上
   // 所以删掉，别拦用户刷新。
 
+  /**
+   * 该显示骨架吗？
+   *
+   * 判断必须用**同步可得**的 `session.loaded`，不能用 messagesLoading ——
+   * 那个是在 effect 里才置 true 的，于是切到冷会话的第一帧会满足
+   * "messages 为空 + loading 还是 false"，先把 Hero 空态渲染出来，
+   * 下一帧再切成骨架 → 用户看到 Hero 闪一下。
+   * loaded 从列表数据里来，渲染时就有，不存在这个空窗。
+   */
+  const sessionPending = activeSession?.loaded === false;
+  const showSkeleton = !hydrated || sessionPending || (messagesLoading && messages.length === 0);
+
   function submit() {
     if (streaming || !input.trim()) return;
     const value = input;
@@ -154,10 +166,8 @@ export function ChatView() {
       </header>
 
       <main ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        {!hydrated || (messagesLoading && messages.length === 0) ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            正在加载会话…
-          </div>
+        {showSkeleton ? (
+          <MessageSkeleton />
         ) : messages.length === 0 ? (
           <Hero
             onPick={(text) => {
@@ -462,5 +472,40 @@ function CopyButton({ text, label = "复制" }: { text: string; label?: string }
       {copied ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
       {copied ? "已复制" : label}
     </button>
+  );
+}
+
+/**
+ * 冷会话在拉消息时的骨架。
+ *
+ * 关键不是好看，是**占位尺寸接近真实内容**：以前这里是一行"正在加载会话…"，
+ * 数据到了整块区域突然换成两三条消息，观感就像页面刷新了一次。
+ * 现在换成同尺寸的灰块，加载完成时几乎看不出版面变化。
+ *
+ * 注意：不做"预热"。冷会话依然会发一次请求，只是这期间不再闪。
+ */
+function MessageSkeleton() {
+  return (
+    <div
+      className="mx-auto w-full max-w-3xl space-y-8 px-4 py-8"
+      data-skeleton="1"
+      aria-busy="true"
+      aria-label="正在加载会话"
+    >
+      {[0, 1].map((row) => (
+        <div key={row} className="animate-pulse space-y-4">
+          {/* 用户那一侧：靠右的短气泡 */}
+          <div className="flex justify-end">
+            <div className={cn("h-9 rounded-2xl bg-muted", row === 0 ? "w-2/5" : "w-1/4")} />
+          </div>
+          {/* 助手那一侧：整段正文 */}
+          <div className="space-y-2.5">
+            <div className="h-3.5 w-full rounded-full bg-muted" />
+            <div className="h-3.5 w-11/12 rounded-full bg-muted" />
+            <div className={cn("h-3.5 rounded-full bg-muted", row === 0 ? "w-4/5" : "w-2/3")} />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

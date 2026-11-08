@@ -350,6 +350,76 @@ check(
 check("切会话后旧节点没有被销毁", same.connected === true);
 check("切会话后焦点没有被打断（仍在输入框）", same.focused === true);
 
+// ---------------------------------------------------------------- 冷会话加载：骨架而不是 Hero 空态
+// 场景要和真实使用一致：**从一条热会话点向冷会话**（客户端切换）。
+// 不能从 / 出发 —— 登录态下 / 会恢复"上次看的会话"，点的那条可能已经是热的；
+// 也不能直连加载 —— 那时 hydrated=false，SSR 直接出骨架，碰不到这个 bug。
+const COLD = await createFixtureSession(userId, "冷会话", [
+  "这是一条冷会话的用户消息",
+  "这是一条冷会话的助手回复",
+]);
+
+// 会话列表是进页面时拉的，重载一次让 COLD 出现在侧栏，同时 A 变成热会话
+await call("Page.navigate", { url: `${baseUrl}/c/${A}` });
+await sleep(3000);
+await waitFor(`location.pathname === '/c/${A}'`, 15000);
+await waitFor(`(document.querySelector('main')?.innerText ?? '').includes('A 会话的第一条用户消息')`, 20000);
+await waitFor(`!!document.querySelector('[data-session-id="${COLD.id}"]')`, 20000);
+await sleep(400);
+
+// 加 700ms 延迟才量得准（本地 60ms 的窗口采样会漏）
+await call("Network.emulateNetworkConditions", {
+  offline: false,
+  latency: 700,
+  downloadThroughput: -1,
+  uploadThroughput: -1,
+});
+
+await evaluate(`document.querySelector('[data-session-id="${COLD.id}"]')?.click(); true`);
+
+let sawSkeleton = false;
+let sawPlainText = false;
+let sawHero = false;
+const trace = [];
+for (let i = 0; i < 45; i += 1) {
+  const probe = await evaluate(`({
+    path: location.pathname,
+    skeleton: !!document.querySelector('[data-skeleton]'),
+    plain: (document.querySelector('main')?.innerText ?? '').includes('正在加载会话'),
+    hero: (document.querySelector('main')?.innerText ?? '').includes('有什么可以帮你的'),
+    roles: document.querySelectorAll('[data-role]').length,
+  })`);
+  if (i < 6) trace.push(`${probe.path.slice(0, 8)}… skel=${probe.skeleton ? "Y" : "-"} hero=${probe.hero ? "Y" : "-"} roles=${probe.roles}`);
+  // 不做 URL 过滤：内容切换是同步的（activeId 立刻变），而 URL 要等 RSC 回来才提交
+  // （Next 把导航包在 transition 里）。骨架期恰好落在"URL 还没变"的那几百毫秒内，
+  // 按 URL 过滤会把要测的窗口整段滤掉 —— 这一点是实测撞出来的。
+  // 点击前页面是热会话 A 的正文，既无骨架也无空态，所以两种信号都可直接采信。
+  if (probe.skeleton) sawSkeleton = true;
+  if (probe.plain) sawPlainText = true;
+  if (probe.hero) sawHero = true;
+  if (probe.roles > 0 && sawSkeleton) break; // 内容已到，可以收工
+  await sleep(50);
+}
+check("冷会话加载中显示骨架", sawSkeleton, trace.join(" | "));
+check("不再出现「正在加载会话…」那行字", !sawPlainText);
+// 专治"骨架之前先闪一下 Hero 空态"：切过去之后不该出现空态
+check("切换后不闪 Hero 空态（骨架先于空态出现）", !sawHero, trace.join(" | "));
+
+await waitFor(`document.querySelectorAll('[data-role]').length >= 2`, 20000);
+const skeletonGone = await evaluate(`!document.querySelector('[data-skeleton]')`);
+check("消息到达后骨架撤掉", skeletonGone === true);
+check(
+  "冷会话正文渲染正确",
+  (await evaluate(`(document.querySelector('main')?.innerText ?? '').includes('冷会话的用户消息')`)) === true,
+);
+
+await call("Network.emulateNetworkConditions", {
+  offline: false,
+  latency: 0,
+  downloadThroughput: -1,
+  uploadThroughput: -1,
+});
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n通过 ${results.length - failed.length}/${results.length}`);
 ws.close();

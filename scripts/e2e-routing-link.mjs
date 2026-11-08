@@ -90,11 +90,30 @@ check("直开 /c/[id] → URL 保持", s.path === `/c/${targetId}`, s.path);
 check("直开 /c/[id] → 标题正确", s.title === expectedTitle, `h1 = ${s.title}`);
 check("直开 /c/[id] → 消息已渲染", s.bubbles > 0, `${s.bubbles} 条气泡`);
 
-// ---------------------------------------------------------------- 侧栏切换
+// ---------------------------------------------------------------- 侧栏项必须是真链接
 const otherId = B.id;
+const linkProbe = await evaluate(`(() => {
+  const el = document.querySelector('[data-session-id="${otherId}"]');
+  return { tag: el?.tagName ?? null, href: el?.getAttribute('href') ?? null };
+})()`);
+check("侧栏会话项是 <a>（可中键新开 / 复制链接 / hover 预取）", linkProbe.tag === "A", `tag=${linkProbe.tag}`);
+check("侧栏会话项 href 指向该会话", linkProbe.href === `/c/${otherId}`, `href=${linkProbe.href}`);
+
+// ---------------------------------------------------------------- 侧栏切换
+// 点击只能产生一条历史记录：Link 一次 + router.push 一次的双跳会留下两条同样的 URL
+// （注意别用 history.length 判断，Chrome 把它封顶在 50，长会话页面里永远不动）
+const histUrls = async () =>
+  (await call("Page.getNavigationHistory")).entries.map((entry) => entry.url);
 await evaluate(`document.querySelector('[data-session-id="${otherId}"]')?.click(); true`);
 await waitFor(`location.pathname === '/c/${otherId}'`, 15000);
 await sleep(800);
+const urls = await histUrls();
+const dupCount = urls.filter((url) => new URL(url).pathname === `/c/${otherId}`).length;
+check(
+  "侧栏切换只留一条历史（没有 Link + router.push 双跳）",
+  dupCount === 1,
+  `同名历史 ${dupCount} 条`,
+);
 s = await state();
 check("侧栏切换 → URL 变成 /c/<新id>", s.path === `/c/${otherId}`, s.path);
 check("侧栏切换 → 标题跟着变", s.title === B.title, `h1 = ${s.title}`);

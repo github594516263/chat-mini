@@ -29,6 +29,10 @@ ws.addEventListener("message", (event) => {
 });
 await new Promise((r) => ws.addEventListener("open", r, { once: true }));
 await call("Page.enable");
+await call("Network.enable");
+// 必须先把 cookie 清掉：这两个套件跑的是游客路径，若浏览器还带着登录态，
+// 侧栏读的会是服务端会话，整个用例的前提就不成立了（真实踩过）。
+await call("Network.clearBrowserCookies");
 await call("Runtime.enable");
 
 const evaluate = async (expression) => {
@@ -39,7 +43,7 @@ const evaluate = async (expression) => {
 
 const titles = () =>
   evaluate(`(() => {
-    const rows = [...document.querySelectorAll('aside button[data-session-id]')];
+    const rows = [...document.querySelectorAll('aside [data-session-id]')];
     return rows.map((b) => b.title);
   })()`);
 

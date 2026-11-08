@@ -419,14 +419,14 @@ function AboutPane({ live, storage }: { live: boolean; storage: "local" | "serve
             {model.selected?.label ?? "—"}
           </span>
         </Field>
-        <Field label="数据源" hint={live ? "已配置 API Key，走真实模型" : "未配置 Key，走假数据流"}>
+        <Field label="数据源" hint={live ? "已配置 API Key，走真实模型" : "未配置 API Key"}>
           <span
             className={cn(
               "rounded-full px-2 py-0.5 text-[10px] font-medium",
               live ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600",
             )}
           >
-            {live ? "live" : "mock"}
+            {live ? "live" : "未配置"}
           </span>
         </Field>
         <Field label="账号数据" hint={storage === "server" ? "服务端 MySQL" : "浏览器本地"}>

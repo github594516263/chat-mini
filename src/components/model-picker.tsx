@@ -311,11 +311,6 @@ export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
                           未配置
                         </span>
                       ) : null}
-                      {group.status === "mock" ? (
-                        <span className="shrink-0 rounded bg-amber-500/10 px-1 py-px text-[9px] font-medium text-amber-600">
-                          mock
-                        </span>
-                      ) : null}
                     </div>
 
                     {group.models.map((model) => {

@@ -6,14 +6,13 @@
  * 服务端查表决定路由——用户改不了请求去哪，这是模型选择器的安全边界。
  *
  * 目录本身写在代码里（而不是数据库）是有意的：
- *   - 现在只有四家、十来条模型，改一次发一次版最省事
+ *   - 现在只有一家、两条模型，改一次发一次版最省事
  *   - 模型名 / 倍率 / 能力是产品配置，不是用户数据
  *   - 以后要动态化，只需要把 MODELS 换成一次查询，下面的解析逻辑不用动
  *
- * 状态三态：
+ * 状态两态：
  *   live = 这家 provider 的 key + base URL 都齐了，真的能发
- *   mock = 全站一个 key 都没配，走内置假数据流（第一次 clone 下来就能玩）
- *   off  = 别家配了 key，这家没配；界面上标「未配置」且不可选，避免选完静默走假流
+ *   off  = 没配 key，界面直接不展示这家（不再有假数据流兜底）
  */
 
 export type ModelCapability = "reasoning" | "vision" | "tools";
@@ -25,7 +24,7 @@ export type ReasoningLevel = {
   value: string;
 };
 
-export type ModelStatus = "live" | "mock" | "off";
+export type ModelStatus = "live" | "off";
 
 export type ProviderConfig = {
   id: string;
@@ -85,9 +84,7 @@ export type PublicProviderGroup = {
 export type ModelCatalog = {
   groups: PublicProviderGroup[];
   defaultId: string;
-  /** 全站是否处于「没有任何 provider 配置」的演示模式 */
-  mock: boolean;
-  /** user=账户自建目录；system=显式启用的系统默认；none=没配且没启用系统目录 */
+  /** user=账户自建目录；system=系统默认目录；none=读取失败/空 */
   origin?: "user" | "system" | "none";
 };
 
@@ -124,8 +121,8 @@ export function resolveReasoningValue(
 }
 
 /**
- * 这里的顺序就是弹层里的分组顺序。
- * 官方放第一个；后面三个对应截图里的中转站分组。
+ * 弹层里的分组顺序。
+ * 只保留真正在用的官方账号；需要接中转站时在这里加一条即可。
  */
 export const PROVIDERS: ProviderConfig[] = [
   {
@@ -134,24 +131,6 @@ export const PROVIDERS: ProviderConfig[] = [
     keyEnv: "DEEPSEEK_API_KEY",
     baseUrlEnv: "DEEPSEEK_BASE_URL",
     defaultBaseUrl: "https://api.deepseek.com",
-  },
-  {
-    id: "starlink",
-    label: "星链",
-    keyEnv: "STARLINK_API_KEY",
-    baseUrlEnv: "STARLINK_BASE_URL",
-  },
-  {
-    id: "devpool",
-    label: "DevPoolAi",
-    keyEnv: "DEVPOOL_API_KEY",
-    baseUrlEnv: "DEVPOOL_BASE_URL",
-  },
-  {
-    id: "fatcat",
-    label: "肥猫005",
-    keyEnv: "FATCAT_API_KEY",
-    baseUrlEnv: "FATCAT_BASE_URL",
   },
 ];
 
@@ -183,42 +162,6 @@ export const MODELS: ModelDefinition[] = [
     description: "复杂推理，会输出思维链",
     capabilities: ["reasoning"],
   },
-  {
-    id: "starlink:v4-flash",
-    provider: "starlink",
-    label: "deepseek-v4-flash",
-    upstream: "deepseek-v4-flash",
-    description: "星链 · 轻量",
-  },
-  {
-    id: "starlink:v4-pro",
-    provider: "starlink",
-    label: "deepseek-v4-pro",
-    upstream: "deepseek-v4-pro",
-    description: "星链 · 推理",
-    capabilities: ["reasoning"],
-  },
-  {
-    id: "starlink:v4.1-flash",
-    provider: "starlink",
-    label: "deepseek-v4.1-flash",
-    upstream: "deepseek-v4.1-flash",
-    description: "星链 · 新版轻量",
-  },
-  {
-    id: "devpool:v4.1-flash",
-    provider: "devpool",
-    label: "deepseek-v4.1-flash",
-    upstream: "deepseek-v4.1-flash",
-    description: "DevPoolAi",
-  },
-  {
-    id: "fatcat:v4.1-flash",
-    provider: "fatcat",
-    label: "deepseek-v4.1-flash",
-    upstream: "deepseek-v4.1-flash",
-    description: "肥猫005",
-  },
 ];
 
 type ProviderState = {
@@ -242,7 +185,6 @@ type RuntimeGroup = {
 type RuntimeCatalog = {
   groups: RuntimeGroup[];
   defaultId: string;
-  mock: boolean;
 };
 
 /** 「https://x.com」「https://x.com/v1」「.../chat/completions」→ 完整地址 */
@@ -287,13 +229,10 @@ function pickDefaultId(groups: RuntimeGroup[]): string {
 }
 
 function buildRuntimeCatalog(): RuntimeCatalog {
-  const states = PROVIDERS.map(readProviderState);
-  const anyLive = states.some((state) => state.configured);
-
-  const groups: RuntimeGroup[] = PROVIDERS.map((config, index) => {
-    const state = states[index];
-    // 一家都没配 → 全体 mock（演示模式）；否则没配的那几家是 off
-    const status: ModelStatus = state.configured ? "live" : anyLive ? "off" : "mock";
+  const groups: RuntimeGroup[] = PROVIDERS.map((config) => {
+    const state = readProviderState(config);
+    // 只分两种：key + 地址齐了就是 live，否则 off（界面上直接不展示）
+    const status: ModelStatus = state.configured ? "live" : "off";
     return {
       state,
       status,
@@ -307,18 +246,20 @@ function buildRuntimeCatalog(): RuntimeCatalog {
   return {
     groups,
     defaultId: pickDefaultId(groups),
-    mock: !anyLive,
   };
 }
 
 /** 给服务端组件 / API 用：只有公开字段，没有 key、地址和 upstream */
 export function getModelCatalog(): ModelCatalog {
   const runtime = buildRuntimeCatalog();
+
+  // 没配 key 的组直接不展示：菜单里不再堆一排「未配置」，看不到就不存在。
+  const visible = runtime.groups.filter((group) => group.status === "live");
+
   return {
     defaultId: runtime.defaultId,
-    mock: runtime.mock,
     origin: "system",
-    groups: runtime.groups.map((group) => ({
+    groups: visible.map((group) => ({
       id: group.state.config.id,
       label: group.state.config.label,
       status: group.status,

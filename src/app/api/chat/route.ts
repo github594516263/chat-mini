@@ -137,7 +137,6 @@ export async function POST(request: NextRequest) {
   return Response.json({
     runId: run.id,
     model: model.definition.id,
-    mock: model.status === "mock",
     afterSeq: 0,
     mode: "guest",
   });

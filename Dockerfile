@@ -33,6 +33,15 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN pnpm build
 
+# ---------------------------------------------------------------- 2.5 脚本依赖
+# create-user.mjs 会直接 import mysql2，需要 node_modules 里真实存在的包；
+# standalone 产物只含被 bundle 进 server.js 的代码，不含原始文件。
+# pnpm 的 node_modules 是一堆指向 .pnpm 的软链接，COPY 过来全会断，
+# 所以用一个干净的 npm 扁平安装，只为拿 mysql2 及其依赖（约 10MB）。
+FROM node:22-slim AS tools
+WORKDIR /tools
+RUN npm install mysql2@3 --omit=dev --no-package-lock --no-audit --no-fund
+
 # ---------------------------------------------------------------- 3. 运行
 FROM node:22-slim AS runner
 WORKDIR /app
@@ -43,13 +52,15 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     TZ=Asia/Shanghai
 
-# standalone 产物里已经带了 server.js 和被 trace 到的 node_modules（含 mysql2）
+# standalone 产物里带了 server.js 和被 trace 到的运行时代码
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
 # 建号脚本要用：注册接口默认关闭，第一个账号只能靠它建
 #   docker compose exec app node scripts/create-user.mjs 你的用户名
 COPY --from=builder /app/scripts ./scripts
+# 脚本运行时要能解析到 mysql2 —— 所以把 tools 阶段的扁平依赖合进来
+COPY --from=tools /tools/node_modules ./node_modules
 
 # 仓库没有 public/ 目录，所以这里不 COPY public（以后加了就再补一行）
 

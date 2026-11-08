@@ -819,12 +819,10 @@ async function countUsableUserModels(userId: string): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-export async function canUseSystemModels(userId: string): Promise<boolean> {
-  // 有自建模型时，系统目录会作为补充分组一起展示，用户可以直接选；
-  // 只有完全没自建模型时，才需要显式打开「系统默认」开关。
-  if ((await countUsableUserModels(userId)) > 0) return true;
-  const preference = await readPreferences(userId);
-  return bool(preference?.use_system_models);
+export async function canUseSystemModels(_userId: string): Promise<boolean> {
+  // 系统目录默认可用：不需要用户先勾选「没有自建模型时，使用系统默认模型」。
+  // 系统目录来自服务器环境变量，不含用户密钥，游客和登录用户一视同仁。
+  return true;
 }
 
 /** 给 composer 用的账户目录：自建 provider + 可用的系统默认分组。 */
@@ -850,6 +848,7 @@ export async function getUserModelCatalog(userId: string): Promise<ModelCatalog>
     .filter((group) => group.models.length > 0);
 
   const system = getModelCatalog();
+  // getModelCatalog 已经滤掉没配 key 的组，这里只会拿到真能用的那些。
   const systemGroups = system.groups
     .filter((group) => group.status === "live")
     .map((group) => ({
@@ -860,7 +859,6 @@ export async function getUserModelCatalog(userId: string): Promise<ModelCatalog>
     }));
 
   // 有自建模型：自建在前，系统默认在后，系统模型始终可选。
-  // 没有自建模型：只有显式打开开关才显示系统目录（保留原来的空状态语义）。
   if (groups.length > 0) {
     const allGroups: ModelCatalog["groups"] = [...groups, ...systemGroups];
     const all = allGroups.flatMap((group) => group.models);
@@ -870,24 +868,20 @@ export async function getUserModelCatalog(userId: string): Promise<ModelCatalog>
     return {
       groups: allGroups,
       defaultId: preferred?.id ?? groups[0]?.models[0]?.id ?? all[0]?.id ?? "",
-      mock: false,
       origin: "user",
     };
   }
 
-  if (settings.useSystemModels) {
-    return {
-      ...system,
-      origin: "system",
-      groups: system.groups.map((group) => ({
-        ...group,
-        system: true,
-        models: group.models.map((model) => ({ ...model, system: true })),
-      })),
-    };
-  }
-
-  return { groups: [], defaultId: "", mock: false, origin: "none" };
+  // 没有自建模型：系统目录默认就在，不需要任何开关。
+  return {
+    ...system,
+    origin: "system",
+    groups: system.groups.map((group) => ({
+      ...group,
+      system: true,
+      models: group.models.map((model) => ({ ...model, system: true })),
+    })),
+  };
 }
 
 /** 把 base_url 补成 OpenAI 兼容的 /models 地址 */
@@ -1394,7 +1388,7 @@ export async function resolveUserModel(
 /**
  * 解析当前用户的一次请求：
  *   1. 先查账户自建模型；
- *   2. 再查系统目录：有自建模型时系统目录始终可选；没有自建模型时需要显式开关；
+ *   2. 再查系统目录：系统目录默认可选，不需要任何开关；
  *   3. 都不命中返回 null，调用方 400，绝不静默换成别的模型。
  */
 export async function resolveModelForUser(

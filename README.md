@@ -16,6 +16,8 @@ pnpm install
 pnpm dev          # http://localhost:3000
 ```
 
+> 生产部署（Docker Compose + MySQL + nginx + HTTPS 证书）的完整步骤、踩坑记录和运维手册见 **[docs/deploy.md](docs/deploy.md)**。
+
 ![聊天界面](docs/chat-live.png)
 
 不配 key 直接就能用：默认走 `src/lib/providers/fake.ts` 的**假数据流**，用来验证协议、渲染和交互。

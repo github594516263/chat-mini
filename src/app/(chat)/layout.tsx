@@ -24,7 +24,7 @@ export default async function ChatLayout({ children }: { children: React.ReactNo
       // 新表还没建/数据库抖动：不要让整页 500，也不要偷偷回退到系统目录，
       // 否则登录用户会看到不属于自己的模型。设置页会显示具体错误。
       console.error("[models] 读取账户模型目录失败:", error);
-      catalog = { groups: [], defaultId: "", mock: false, origin: "none" };
+      catalog = { groups: [], defaultId: "", origin: "none" };
     }
   }
   const live = catalog.groups.some((group) => group.status === "live");

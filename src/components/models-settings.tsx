@@ -179,26 +179,6 @@ export function ModelsPane({ user }: { user: AccountUser | null }) {
     router.refresh();
   }, [load, router]);
 
-  const setSystemModels = useCallback(
-    async (value: boolean) => {
-      setBusy(true);
-      setError(null);
-      try {
-        await apiJson("/api/models/preferences", {
-          method: "PUT",
-          body: JSON.stringify({ useSystemModels: value }),
-        });
-        setSettings((current) => (current ? { ...current, useSystemModels: value } : current));
-        router.refresh();
-      } catch (err) {
-        setError((err as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [router],
-  );
-
   const createProvider = useCallback(
     async (body: Record<string, unknown>) => {
       setBusy(true);
@@ -397,22 +377,6 @@ export function ModelsPane({ user }: { user: AccountUser | null }) {
           添加模型提供商
         </button>
       </div>
-
-      <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border bg-muted/20 px-3.5 py-3">
-        <input
-          type="checkbox"
-          checked={settings?.useSystemModels ?? false}
-          disabled={busy || loading || !settings}
-          onChange={(event) => void setSystemModels(event.target.checked)}
-          className="mt-0.5 size-3.5 accent-primary"
-        />
-        <span className="min-w-0">
-          <span className="block text-[12px] text-foreground">没有自建模型时，使用系统默认模型</span>
-          <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
-            系统默认来自服务器环境变量，不会复制你的密钥。已有自建模型时，系统默认模型也会列在模型菜单末尾，可以直接选。
-          </span>
-        </span>
-      </label>
 
       {error ? (
         <div className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/5 px-3.5 py-2.5 text-[12px] text-rose-600">

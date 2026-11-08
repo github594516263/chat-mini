@@ -13,3 +13,7 @@ shots-framework
 
 # 本地数据库备份（含用户/会话数据，不提交）
 backups/
+
+# 部署用的 SSH 私钥和临时脚本，绝对不能提交
+.ssh-deploy/
+.tmp-deploy/

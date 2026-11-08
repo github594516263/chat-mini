@@ -128,7 +128,7 @@ export const Sidebar = memo(function Sidebar({
                 live ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600",
               )}
             >
-              {live ? "live" : "mock"}
+              {live ? "live" : "未配置"}
             </span>
             {variant === "desktop" ? (
               <button

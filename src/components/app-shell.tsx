@@ -27,7 +27,7 @@ type AppShellApi = {
   openSettings: (section?: SettingsSection) => void;
   themeMode: ThemeMode;
   setTheme: (mode: ThemeMode) => void;
-  /** 当前是否接了真实模型（顶栏要显示 live / mock） */
+  /** 当前是否接了真实模型（顶栏要显示 live / 未配置） */
   live: boolean;
 };
 

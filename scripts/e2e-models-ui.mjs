@@ -183,7 +183,7 @@ try {
     const button = [...document.querySelectorAll('button')].find((item) => item.innerText.includes('E2E UI 模型'));
     return button?.innerText.trim() ?? null;
   })()`);
-  check("composer 只显示账户模型", afterModel?.includes("E2E UI 模型"), String(afterModel));
+  check("composer 默认显示账户模型", afterModel?.includes("E2E UI 模型"), String(afterModel));
 
   await evaluate(`document.querySelector('[data-composer]').focus()`);
   await evaluate(`(() => {
@@ -209,10 +209,42 @@ try {
     button.click();
   })()`);
   await sleep(400);
-  const options = await evaluate(`[...document.querySelectorAll('[role="option"]')].map((item) => item.innerText.replace(/\\n/g, ' '))`);
-  check("选择器里只有账户模型", options.length === 1, JSON.stringify(options));
-  check("选项名正确", options[0]?.includes("E2E UI 模型"));
-  check("系统模型没有混进来", !options.some((text) => text.includes("DeepSeek-V4")));
+  const options = await evaluate(`[...document.querySelectorAll('[role="option"]')].map((item) => ({
+    text: item.innerText.replace(/\\n/g, ' '),
+    disabled: item.getAttribute('aria-disabled') === 'true',
+  }))`);
+  check(
+    "选择器里同时有账户模型和系统默认模型",
+    options.length > 1 && options.some((item) => item.text.includes("E2E UI 模型")),
+    JSON.stringify(options),
+  );
+  check("账户模型选项名正确", options.some((item) => item.text.includes("E2E UI 模型")));
+  check(
+    "系统默认模型已展示且可选",
+    options.some((item) => item.text.includes("DeepSeek-V4.1-Flash") && !item.disabled),
+    JSON.stringify(options),
+  );
+
+  await evaluate(`(() => {
+    const option = [...document.querySelectorAll('[role="option"]')]
+      .find((item) => item.innerText.includes('DeepSeek-V4.1-Flash'));
+    if (!option) throw new Error('找不到系统默认模型');
+    option.click();
+  })()`);
+  await sleep(300);
+  const savedSystem = await evaluate(`Object.entries(localStorage)
+    .find(([key]) => key.startsWith('chat-mini/model/v1/'))?.[1] ?? null`);
+  check("选中系统默认模型会写入选择", savedSystem === "deepseek:v4.1-flash", String(savedSystem));
+
+  await evaluate(`document.querySelector('button[aria-haspopup="listbox"]').click()`);
+  await sleep(250);
+  await evaluate(`(() => {
+    const option = [...document.querySelectorAll('[role="option"]')]
+      .find((item) => item.innerText.includes('E2E UI 模型'));
+    if (!option) throw new Error('找不到账户模型');
+    option.click();
+  })()`);
+  await sleep(250);
   await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
   await sleep(250);
 

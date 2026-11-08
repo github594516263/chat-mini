@@ -820,12 +820,14 @@ async function countUsableUserModels(userId: string): Promise<number> {
 }
 
 export async function canUseSystemModels(userId: string): Promise<boolean> {
+  // 有自建模型时，系统目录会作为补充分组一起展示，用户可以直接选；
+  // 只有完全没自建模型时，才需要显式打开「系统默认」开关。
+  if ((await countUsableUserModels(userId)) > 0) return true;
   const preference = await readPreferences(userId);
-  if (!bool(preference?.use_system_models)) return false;
-  return (await countUsableUserModels(userId)) === 0;
+  return bool(preference?.use_system_models);
 }
 
-/** 给 composer 用的账户目录：只包含已启用且可用的模型。 */
+/** 给 composer 用的账户目录：自建 provider + 可用的系统默认分组。 */
 export async function getUserModelCatalog(userId: string): Promise<ModelCatalog> {
   const settings = await listModelSettings(userId);
   const groups = settings.providers
@@ -847,21 +849,33 @@ export async function getUserModelCatalog(userId: string): Promise<ModelCatalog>
     }))
     .filter((group) => group.models.length > 0);
 
+  const system = getModelCatalog();
+  const systemGroups = system.groups
+    .filter((group) => group.status === "live")
+    .map((group) => ({
+      ...group,
+      system: true,
+      label: `系统默认 · ${group.label}`,
+      models: group.models.map((model) => ({ ...model, system: true })),
+    }));
+
+  // 有自建模型：自建在前，系统默认在后，系统模型始终可选。
+  // 没有自建模型：只有显式打开开关才显示系统目录（保留原来的空状态语义）。
   if (groups.length > 0) {
-    const all = groups.flatMap((group) => group.models);
+    const allGroups: ModelCatalog["groups"] = [...groups, ...systemGroups];
+    const all = allGroups.flatMap((group) => group.models);
     const preferred = settings.defaultModelId
       ? all.find((model) => model.id === settings.defaultModelId)
       : undefined;
     return {
-      groups,
-      defaultId: preferred?.id ?? all[0]?.id ?? "",
+      groups: allGroups,
+      defaultId: preferred?.id ?? groups[0]?.models[0]?.id ?? all[0]?.id ?? "",
       mock: false,
       origin: "user",
     };
   }
 
   if (settings.useSystemModels) {
-    const system = getModelCatalog();
     return {
       ...system,
       origin: "system",
@@ -1379,8 +1393,9 @@ export async function resolveUserModel(
 
 /**
  * 解析当前用户的一次请求：
- *   1. 有自定义模型 → 只查自定义模型；
- *   2. 没有可用自定义模型且显式开启系统默认 → 才回退到环境变量目录。
+ *   1. 先查账户自建模型；
+ *   2. 再查系统目录：有自建模型时系统目录始终可选；没有自建模型时需要显式开关；
+ *   3. 都不命中返回 null，调用方 400，绝不静默换成别的模型。
  */
 export async function resolveModelForUser(
   userId: string,

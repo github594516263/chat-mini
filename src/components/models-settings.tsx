@@ -390,9 +390,9 @@ export function ModelsPane({ user }: { user: AccountUser | null }) {
           className="mt-0.5 size-3.5 accent-primary"
         />
         <span className="min-w-0">
-          <span className="block text-[12px] text-foreground">没有可用自定义模型时，使用系统默认模型</span>
+          <span className="block text-[12px] text-foreground">没有自建模型时，使用系统默认模型</span>
           <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
-            系统默认来自服务器环境变量，不会把你的密钥复制进账户；有自定义模型时不会混进来。
+            系统默认来自服务器环境变量，不会复制你的密钥。已有自建模型时，系统默认模型也会列在模型菜单末尾，可以直接选。
           </span>
         </span>
       </label>

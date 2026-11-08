@@ -15,7 +15,7 @@
 三条硬要求：
 
 1. **归属**：provider 和 model 都有 `user_id`，A 用户配置的模型 B 用户看不到、改不了。
-2. **可用性**：登录用户只看到自己配置且启用的模型；没配置就是空状态，不偷偷混入系统目录。
+2. **可用性**：登录用户能看到自己配置且启用的模型，以及可用的系统默认模型；完全没配置时仍是空状态（除非显式打开开关）。
 3. **密钥**：API Key 属于账户，服务端加密存储，前端永远拿不到明文。
 
 已确认的产品决策：
@@ -23,7 +23,8 @@
 | 决策 | 结论 |
 | --- | --- |
 | 配置粒度 | 每个 chat-mini 用户各自一份 |
-| 零配置行为 | 空状态 + 显式「没有可用自定义模型时，使用系统默认模型」开关 |
+| 零配置行为 | 空状态 + 显式「没有自建模型时，使用系统默认模型」开关 |
+| 有自建模型时 | 自建模型在前，可用的系统默认模型作为分组追加在后，均可选 |
 | 系统默认来源 | 服务器环境变量里的 `DEEPSEEK_*` / 其他 `*_API_KEY` 目录 |
 | 自建 provider 的地址 | 默认拒绝 localhost / 内网 / 链路本地地址（防 SSRF） |
 | 第一版范围 | provider / model CRUD + 测试连接 / 发现 + 推理等级；图片输入、OAuth 放 P4c |
@@ -138,7 +139,7 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 ### 4.4 `user_model_preferences`
 
 - `default_model_id`：用户偏好的默认模型，删除模型时 `SET NULL`；
-- `use_system_models`：**显式**回退开关，默认 0；
+- `use_system_models`：无自建模型时的显式回退开关，默认 0；有自建模型时系统目录始终作为补充分组出现；
 - 一行一个用户。
 
 > 为什么不用一个 JSON 列存全部配置？
@@ -156,7 +157,7 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 1. 查该用户的 provider / model / preference；
 2. 只保留 `provider.enabled && provider.status === "live"` 的分组；
 3. 只保留 `model.enabled` 的模型；
-4. 有可用自定义模型 → `origin: "user"`；
+4. 有可用自定义模型 → `origin: "user"`，并把可用的系统默认分组追加到末尾；
 5. 没有自定义模型，但 `use_system_models=1` → 返回系统目录，`origin: "system"`；
 6. 否则 → `groups: []`、`origin: "none"`。
 
@@ -170,7 +171,7 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 
 `resolveModelForUser(userId, requestedId)`：
 
-- 有 `requestedId`：先按 `(model.id, user_id)` 查自定义模型；查不到且用户确实没有可用自定义模型、并显式开了系统兜底，才查系统目录；
+- 有 `requestedId`：先按 `(model.id, user_id)` 查自定义模型；查不到再查系统目录（有自建模型时始终可查，没有自建模型时需要显式开关）；
 - 没有 `requestedId`：用目录的 `defaultId`，再按 `origin` 决定走自定义还是系统；
 - 返回的 `ResolvedModel` 只包含服务端路由需要的字段：上游模型名、base URL、解密后的 key、max tokens、推理档位。
 
@@ -280,7 +281,7 @@ ALLOW_PRIVATE_MODEL_ENDPOINTS=true
 `src/components/models-settings.tsx`：
 
 - 顶部「添加模型提供商」；
-- 系统默认开关卡片；
+- 系统默认开关卡片：无自建模型时控制是否显示系统目录；有自建模型时系统默认分组始终出现；
 - provider 行：状态点、名称、状态文案、模型数量、编辑、删除；
 - 展开卡片：显示名称、API 地址、协议、密钥、无需密钥、启用、保存/取消；
 - 「测试连接」：新建表单里可以先测；已有 provider 卡片里也能测。请求上游 `/models`，显示延迟和发现的模型，可勾选后一键导入；
@@ -302,6 +303,7 @@ ALLOW_PRIVATE_MODEL_ENDPOINTS=true
 
 - 目录为空时，触发器显示「配置模型」，点击直接打开设置 → 模型；
 - 有模型时保持原来的搜索、分组、键盘操作、localStorage 持久化；
+- 有自建模型时，末尾追加「系统默认 · …」分组；系统模型可选，选中后和自建模型一样按公开 id 路由；
 - 选中模型配置了推理等级时，模型按钮左侧出现档位选择；选择按模型分别记在 localStorage，模型没配等级时不渲染；
 - 发送按钮在 `selectedId` 为空时禁用，并给出「还没有可用模型」提示。
 
@@ -339,8 +341,8 @@ P4c 未做的显式标记：
 pnpm typecheck
 pnpm build
 
-node scripts/e2e-model-config.mjs   # 58 项：隔离 / 加密 / SSRF / 并发 / 推理等级 / 系统回退
-node scripts/e2e-models-ui.mjs      # 25 项：设置页 CRUD / 推理等级 / composer / 回退开关
+node scripts/e2e-model-config.mjs   # 59 项：隔离 / 加密 / SSRF / 并发 / 推理等级 / 系统默认模型
+node scripts/e2e-models-ui.mjs      # 26 项：设置页 CRUD / 推理等级 / 系统默认模型 / composer
 node scripts/e2e-model-picker.mjs   # 25 项：游客模型切换回归
 node scripts/e2e-model-discovery.mjs # 26 项：真实 /models 发现 / 元数据 / 批量导入
 node scripts/e2e-discovery-ui.mjs   # 10 项：设置页测试连接 / 一键导入
@@ -362,6 +364,7 @@ node scripts/e2e-discovery-ui.mjs   # 10 项：设置页测试连接 / 一键导
 - `127.0.0.1`、`[::ffff:127.0.0.1]`、`file://` 都被拒绝；
 - 没有自定义模型且开关关闭 → `origin: "none"`、空分组；
 - 开关打开 → `origin: "system"`、系统目录；
+- 有自定义模型时，系统默认分组也会出现，且系统模型可选。
 - 设置页添加 provider/model 后，composer 只显示该模型；
 - 删除 provider 后回到空状态。
 

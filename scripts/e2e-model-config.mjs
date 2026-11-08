@@ -192,6 +192,14 @@ try {
   check(catalog.body?.origin === "user", "catalog origin=user", catalog.body?.origin);
   check(catalog.body?.groups?.some((group) => group.id === providerId), "catalog 含新 provider");
   check(catalog.body?.defaultId === modelId, "新模型自动成为默认");
+  check(
+    catalog.body?.groups?.some(
+      (group) =>
+        group.system === true &&
+        group.models?.some((model) => model.id === "deepseek:v4.1-flash" && model.status !== "off"),
+    ),
+    "有自建模型时也展示可选的系统默认模型",
+  );
 
   const list = await request("/api/models/providers");
   const provider = list.body?.providers?.find((item) => item.id === providerId);

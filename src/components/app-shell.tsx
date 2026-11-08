@@ -139,7 +139,8 @@ export function AppShell({ user, live, storage, children, ...sidebarProps }: App
               type="button"
               aria-label="关闭侧栏"
               onClick={() => setMobileOpen(false)}
-              className="flex-1 bg-foreground/20 backdrop-blur-sm"
+              // 同上：抽屉遮罩也用纯色，避免全屏 backdrop-filter 拖累滚动
+              className="flex-1 bg-foreground/25"
             />
           </div>
         ) : null}

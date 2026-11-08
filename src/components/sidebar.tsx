@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   PanelLeftClose,
   PanelLeftOpen,
@@ -44,7 +44,11 @@ const RAIL_WIDTH = 68;
 // 开发时给账号头像多留一点下边距，生产环境不需要。
 const RAIL_FOOTER_PAD = process.env.NODE_ENV === "production" ? "pb-2" : "pb-12";
 
-export function Sidebar({
+/**
+ * 侧栏。**memo 的**：会话列表、当前选中、各种回调引用都不随聊天状态（草稿、token、
+ * 光标）变化，所以打字和流式不该把 37 行会话重渲染一遍。
+ */
+export const Sidebar = memo(function Sidebar({
   sessions,
   activeId,
   onSelect,
@@ -309,4 +313,4 @@ export function Sidebar({
       </div>
     </aside>
   );
-}
+});

@@ -136,8 +136,15 @@ export function useChat(
    * A 在后台继续生成的同时，用户可能在 B 里发消息 —— 两件事都要能成立。
    */
   const [streamingIds, setStreamingIds] = useState<string[]>([]);
-  /** 输入框草稿按会话存：切走再回来还在 */
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /**
+   * 输入框草稿按会话存：切走再回来还在。
+   *
+   * 故意用 ref 而不是 state：草稿是**输入框自己的状态**，一次按键不该让
+   * ChatShell → Sidebar / 消息列表整棵树重渲染。改成 state 时实测每个按键
+   * 23ms 的主线程 JS（dev 构建），而这里只需要"记住字符串"。
+   * 输入框组件自己用 useState 渲染，写完再回写这里，两边各管一层。
+   */
+  const draftsRef = useRef<Map<string, string>>(new Map());
   /**
    * 正在编辑的那条消息，也按会话存。
    * 不这么做的话，切走再回来编辑框就没了 —— 草稿能活、编辑态不能活，
@@ -276,7 +283,6 @@ export function useChat(
 
   /** 只有"当前这条会话"在生成时才算 streaming；别的会话在后台跑不影响这里 */
   const streaming = activeId !== null && streamingIds.includes(activeId);
-  const draft = activeId ? (drafts[activeId] ?? "") : "";
 
   /** 这条会话有没有在跑（守卫用；读 ref，不触发渲染） */
   const isRunning = useCallback((sessionId: string) => runsRef.current.has(sessionId), []);
@@ -289,14 +295,18 @@ export function useChat(
     });
   }, []);
 
-  /** 写当前会话的草稿。切走再回来，草稿还在（Step 2 的核心之一） */
-  const setDraft = useCallback(
-    (value: string) => {
-      if (!activeId) return;
-      setDrafts((prev) => ({ ...prev, [activeId]: value }));
-    },
-    [activeId],
+  /**
+   * 读/写某条会话的草稿（纯 ref，不触发渲染）。
+   * 输入框拿到会话切换时用 getDraft 重新起稿，按键时 setDraft 回写 —— 都不惊动这棵大树。
+   */
+  const getDraft = useCallback(
+    (sessionId: string | null) => (sessionId ? (draftsRef.current.get(sessionId) ?? "") : ""),
+    [],
   );
+
+  const setDraft = useCallback((sessionId: string, value: string) => {
+    draftsRef.current.set(sessionId, value);
+  }, []);
 
   // ---------------------------------------------------------------- 编辑态（按会话）
 
@@ -1039,12 +1049,19 @@ export function useChat(
             const data = (await readJsonResponse(response)) as { session?: ApiSession };
             if (!data.session) throw new Error("服务端没有返回会话");
             const real = toUiSession(data.session, [], true);
+            // 草稿跟着 id 走：建会话可能比用户打字慢，临时 id 换成真 id 时别把已经写的字弄丢
+            const carried = draftsRef.current.get(tempId);
+            if (carried) {
+              draftsRef.current.set(real.id, carried);
+              draftsRef.current.delete(tempId);
+            }
             // 把临时 id 换成服务端 id
             setSessions((prev) => prev.map((s) => (s.id === tempId ? real : s)));
             setActiveId((current) => (current === tempId ? real.id : current));
             // 真 id 到手，通知外层把地址栏换成 /c/<真id>（草稿态到此结束）
             options.onCreated?.(real.id);
           } catch {
+            draftsRef.current.delete(tempId);
             setSessions((prev) => prev.filter((s) => s.id !== tempId));
             setActiveId((current) =>
               current === tempId ? (stateRef.current.sessions[0]?.id ?? null) : current,
@@ -1079,12 +1096,7 @@ export function useChat(
       const nextId = remaining.length > 0 ? sortSessions(remaining)[0].id : null;
 
       setSessions(remaining);
-      setDrafts((prev) => {
-        if (!(sessionId in prev)) return prev;
-        const next = { ...prev };
-        delete next[sessionId];
-        return next;
-      });
+      draftsRef.current.delete(sessionId);
       setEditing((prev) => {
         if (!(sessionId in prev)) return prev;
         const next = { ...prev };
@@ -1152,7 +1164,7 @@ export function useChat(
     messages: active?.messages ?? [],
     streaming,
     streamingIds,
-    draft,
+    getDraft,
     setDraft,
     editState,
     beginEdit,

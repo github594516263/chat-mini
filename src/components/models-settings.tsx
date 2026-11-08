@@ -123,21 +123,38 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/**
+ * 设置面板每次切到「模型」都会重新挂载 → 重新拉一次 providers。
+ * dev 下这条接口实测能到 0.5–1.3s（Turbopack 冷启动 + 数据库），用户感受就是
+ * "点一下要等一下"。所以这里留一份内存缓存：切回来先用缓存立刻出画，
+ * 超过 TTL 再后台刷新；写操作（增删改）照样显式 refresh。
+ */
+const SETTINGS_CACHE_TTL_MS = 30_000;
+let settingsCache: { data: ModelSettings; at: number } | null = null;
+
+function readSettingsCache(): ModelSettings | null {
+  if (!settingsCache) return null;
+  return Date.now() - settingsCache.at < SETTINGS_CACHE_TTL_MS ? settingsCache.data : null;
+}
+
 export function ModelsPane({ user }: { user: AccountUser | null }) {
   const router = useRouter();
-  const [settings, setSettings] = useState<ModelSettings | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cached = readSettingsCache();
+  const [settings, setSettings] = useState<ModelSettings | null>(cached);
+  const [loading, setLoading] = useState(!cached);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(cached?.providers[0]?.id ?? null);
   const [addingProvider, setAddingProvider] = useState(false);
   const [addingModelFor, setAddingModelFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    // 有缓存就先别闪 loading：直接后台对齐
+    setLoading((current) => (settingsCache ? current : true));
     try {
       const data = await apiJson<ModelSettings>("/api/models/providers");
+      settingsCache = { data, at: Date.now() };
       setSettings(data);
       setError(null);
       setExpanded((current) =>

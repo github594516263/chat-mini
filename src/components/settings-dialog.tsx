@@ -88,11 +88,17 @@ export function SettingsDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
+      {/*
+        遮罩：纯半透明，不用 backdrop-filter。
+        全屏 backdrop-blur 在 Chromium 里会给弹层建一个 backdrop root，弹层内部滚动时
+        这层模糊会被反复重算 —— 实测弹窗内容滚动掉帧就是它（关掉图形加速时更夸张）。
+        视觉上几乎一样，代价却从"每帧全屏模糊"变成"一次纯色填充"。
+      */}
       <button
         type="button"
         aria-label="关闭设置"
         onClick={onClose}
-        className="absolute inset-0 cursor-default bg-foreground/25 backdrop-blur-[2px]"
+        className="absolute inset-0 cursor-default bg-foreground/30"
       />
 
       <div
@@ -166,7 +172,13 @@ export function SettingsDialog({
             ))}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+          {/*
+            transform-gpu 看着多余，其实是为了滚动性能：给滚动容器单独提升一个合成层，
+            滚动时合成器只移动这一层，不用每帧重绘整个弹层。
+            软件渲染下实测合成耗时 1031ms → 415ms（同一组滚轮事件），光栅几乎归零。
+            注意：这会让容器成为 fixed 定位的包含块，所以这里不要再放 position:fixed 的东西。
+          */}
+          <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6 transform-gpu">
             {section === "general" ? <GeneralPane /> : null}
             {section === "models" ? <ModelsPane user={user} /> : null}
             {section === "appearance" ? (

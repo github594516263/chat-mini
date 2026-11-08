@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Check, Copy, PanelLeft, Pencil, RotateCcw, Square } from "lucide-react";
 import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
@@ -41,6 +41,24 @@ const ACTION_BTN =
   "flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
 
 /**
+ * 消息列表上要用的动作，统一收在一个**稳定**对象里。
+ *
+ * 为什么不能直接把 chat.xxx 传进 memo 过的 Bubble：useChatContext() 每次渲染都给
+ * 一个新的 chat 对象，回调引用跟着全变，memo 会全部失效（等于没 memo）。
+ * 所以这里用 ref 取"最新的 chat"，回调本身靠 useMemo 保持引用不变。
+ */
+type MessageActions = {
+  beginEdit: (messageId: string, content: string) => void;
+  updateEditDraft: (draft: string) => void;
+  endEdit: () => void;
+  editAndResend: (messageId: string, text: string) => void;
+  regenerate: (messageId: string) => void;
+  continueGeneration: (messageId: string) => void;
+};
+
+type ComposerApi = { setText: (text: string) => void; focus: () => void };
+
+/**
  * 页面主体。会话状态全部来自 ChatContext（挂在 layout 上的 Provider），
  * 所以这个组件可以随页面重建 —— 重建之后草稿和生成中的正文都还在。
  */
@@ -58,31 +76,38 @@ export function ChatView() {
     messagesLoading,
     send,
     stop,
-    regenerate,
-    editAndResend,
-    continueGeneration,
-    draft: input,
-    setDraft: setInput,
     editState,
-    beginEdit,
-    updateEditDraft,
-    endEdit,
+    getDraft,
+    setDraft,
     rememberScroll,
     recallScroll,
   } = chat;
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  /** 输入框的对外把手：Hero 的推荐问句要能把文字塞进去 */
+  const composerApi = useRef<ComposerApi | null>(null);
   /** 刚切到哪条会话：用来区分"切过来"和"同一条会话里长出新内容" */
   const restoreForRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "0px";
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [input]);
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
+
+  const actions = useMemo<MessageActions>(
+    () => ({
+      beginEdit: (messageId, content) => chatRef.current.beginEdit(messageId, content),
+      updateEditDraft: (value) => chatRef.current.updateEditDraft(value),
+      endEdit: () => chatRef.current.endEdit(),
+      editAndResend: (messageId, text) => {
+        chatRef.current.endEdit();
+        void chatRef.current.editAndResend(messageId, text);
+      },
+      regenerate: (messageId) => void chatRef.current.regenerate(messageId),
+      continueGeneration: (messageId) => void chatRef.current.continueGeneration(messageId),
+    }),
+    [],
+  );
+
 
   // 切会话：标记这次需要恢复位置（位置本身存在 Provider 里）
   useEffect(() => {
@@ -133,13 +158,6 @@ export function ChatView() {
   const sessionPending = activeSession?.loaded === false;
   const showSkeleton = !hydrated || sessionPending || (messagesLoading && messages.length === 0);
 
-  function submit() {
-    if (streaming || !input.trim()) return;
-    const value = input;
-    setInput("");
-    void send(value);
-  }
-
   return (
     <>
       <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-3">
@@ -165,107 +183,181 @@ export function ChatView() {
         </span>
       </header>
 
-      <main ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+      {/* transform-gpu：把消息滚动区提到独立合成层，滚动时不再重绘整页（见设置弹层里的说明） */}
+      <main ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto transform-gpu">
         {showSkeleton ? (
           <MessageSkeleton />
         ) : messages.length === 0 ? (
           <Hero
             onPick={(text) => {
-              setInput(text);
-              textareaRef.current?.focus();
+              composerApi.current?.setText(text);
+              composerApi.current?.focus();
             }}
           />
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
-            {messages.map((message) => (
+            {messages.map((message) => {
               // data-role 是给端到端测试用的锚点：按角色定位气泡，不依赖样式
-              <div key={message.id} data-role={message.role}>
-                <Bubble
-                  message={message}
-                  streaming={streaming}
-                  editing={editState?.messageId === message.id}
-                  draft={editState?.draft ?? ""}
-                  onDraftChange={updateEditDraft}
-                  onEditStart={(target) => beginEdit(target.id, target.content)}
-                  onEditCancel={endEdit}
-                  onEditSubmit={(id, text) => {
-                    endEdit();
-                    void editAndResend(id, text);
-                  }}
-                  onRegenerate={(id) => void regenerate(id)}
-                  onContinue={(id) => void continueGeneration(id)}
-                />
-              </div>
-            ))}
+              const isEditingThis = editState?.messageId === message.id;
+              return (
+                <div key={message.id} data-role={message.role}>
+                  <Bubble
+                    message={message}
+                    streaming={streaming}
+                    editing={isEditingThis}
+                    // 只有正在编辑的那条才需要草稿，别的传空串，避免逐字重渲染时把所有气泡都标记为脏
+                    draft={isEditingThis ? (editState?.draft ?? "") : ""}
+                    actions={actions}
+                  />
+                </div>
+              );
+            })}
             <div ref={bottomRef} className="h-px" />
           </div>
         )}
       </main>
 
-      <div className="shrink-0 border-t border-border bg-background">
-        <div className="mx-auto w-full max-w-3xl px-4 py-3">
-          <div className="relative flex flex-wrap items-end gap-x-2 gap-y-1.5 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
-            <textarea
-              ref={textareaRef}
-              data-composer="1"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              rows={1}
-              placeholder="给 chat-mini 发送消息…"
-              className="max-h-[200px] min-w-[9rem] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
-            />
-            {/* 窄屏放不下一行时，这组会整体折到第二行，而不是把输入框挤成三行 */}
-            <div className="ml-auto flex items-center gap-1.5">
-              <ReasoningPicker
-                levels={model.reasoningLevels}
-                value={model.reasoning}
-                onChange={model.setReasoning}
-              />
-              <ModelPicker
-                groups={model.groups}
-                selected={model.selected}
-                onSelect={model.select}
-              />
-              <button
-                type="button"
-                onClick={streaming ? stop : submit}
-                disabled={!streaming && (!input.trim() || !model.selectedId)}
-                title={!model.selectedId ? "先在设置 → 模型里配置一个模型" : undefined}
-                aria-label={streaming ? "停止生成" : "发送"}
-                className={cn(
-                  "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
-                  streaming
-                    ? "bg-foreground text-background hover:opacity-90"
-                    : "bg-primary text-primary-foreground hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground",
-                )}
-              >
-                {streaming ? (
-                  <Square size={13} fill="currentColor" />
-                ) : (
-                  <ArrowUp size={16} strokeWidth={2.4} />
-                )}
-              </button>
-            </div>
-          </div>
-          {!model.selectedId ? (
-            <p className="mt-2 text-center text-[11px] text-amber-600">
-              还没有可用模型。点输入框右侧的「配置模型」，或打开设置 → 模型添加一个。
-            </p>
-          ) : null}
-          <p className="mt-2 text-center text-[11px] text-muted-foreground">
-            内容由 AI 生成，请自行核对
-            <span className="hidden sm:inline"> · Enter 发送，Shift+Enter 换行</span>
-            <span className="hidden md:inline"> · 自研 NDJSON 事件协议</span>
-          </p>
-        </div>
-      </div>
+      {/* 输入框单独成组件：文字是它自己的 state，按键只重渲染这一块，
+          不再顺着 ChatShell → 侧栏 / 消息列表整棵树重跑 */}
+      <Composer
+        api={composerApi}
+        sessionId={activeId}
+        streaming={streaming}
+        model={model}
+        getDraft={getDraft}
+        setDraft={setDraft}
+        onSend={send}
+        onStop={stop}
+      />
     </>
+  );
+}
+
+/**
+ * 输入框。
+ *
+ * 文字存在本地 state，同时回写到 useChat 里按会话存的草稿（ref，不触发渲染）——
+ * 这样"按键"和"切会话/重挂"两件事互不牵连：按键只动这一块，切回来还能接着写。
+ */
+function Composer({
+  api,
+  sessionId,
+  streaming,
+  model,
+  getDraft,
+  setDraft,
+  onSend,
+  onStop,
+}: {
+  api: { current: ComposerApi | null };
+  sessionId: string | null;
+  streaming: boolean;
+  model: ReturnType<typeof useModelContext>;
+  getDraft: (sessionId: string | null) => string;
+  setDraft: (sessionId: string, value: string) => void;
+  onSend: (text: string) => void;
+  onStop: () => void;
+}) {
+  const [text, setText] = useState(() => getDraft(sessionId));
+  const [lastSession, setLastSession] = useState(sessionId);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 切会话就换一份草稿。在渲染期就地调整（React 的官方写法），不会闪一帧旧文字
+  if (sessionId !== lastSession) {
+    setLastSession(sessionId);
+    setText(getDraft(sessionId));
+  }
+
+  const update = (next: string) => {
+    setText(next);
+    if (sessionId) setDraft(sessionId, next);
+  };
+
+  // 从外面塞话（首页推荐问句）
+  api.current = {
+    setText: update,
+    focus: () => textareaRef.current?.focus(),
+  };
+
+  // 自适应高度：只跟着这一块自己的文字走
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [text]);
+
+  function submit() {
+    if (streaming || !text.trim()) return;
+    const value = text;
+    update("");
+    void onSend(value);
+  }
+
+  return (
+    <div className="shrink-0 border-t border-border bg-background">
+      <div className="mx-auto w-full max-w-3xl px-4 py-3">
+        <div className="relative flex flex-wrap items-end gap-x-2 gap-y-1.5 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
+          <textarea
+            ref={textareaRef}
+            data-composer="1"
+            value={text}
+            onChange={(event) => update(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                submit();
+              }
+            }}
+            rows={1}
+            placeholder="给 chat-mini 发送消息…"
+            className="max-h-[200px] min-w-[9rem] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
+          />
+          {/* 窄屏放不下一行时，这组会整体折到第二行，而不是把输入框挤成三行 */}
+          <div className="ml-auto flex items-center gap-1.5">
+            <ReasoningPicker
+              levels={model.reasoningLevels}
+              value={model.reasoning}
+              onChange={model.setReasoning}
+            />
+            <ModelPicker
+              groups={model.groups}
+              selected={model.selected}
+              onSelect={model.select}
+            />
+            <button
+              type="button"
+              onClick={streaming ? onStop : submit}
+              disabled={!streaming && (!text.trim() || !model.selectedId)}
+              title={!model.selectedId ? "先在设置 → 模型里配置一个模型" : undefined}
+              aria-label={streaming ? "停止生成" : "发送"}
+              className={cn(
+                "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
+                streaming
+                  ? "bg-foreground text-background hover:opacity-90"
+                  : "bg-primary text-primary-foreground hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground",
+              )}
+            >
+              {streaming ? (
+                <Square size={13} fill="currentColor" />
+              ) : (
+                <ArrowUp size={16} strokeWidth={2.4} />
+              )}
+            </button>
+          </div>
+        </div>
+        {!model.selectedId ? (
+          <p className="mt-2 text-center text-[11px] text-amber-600">
+            还没有可用模型。点输入框右侧的「配置模型」，或打开设置 → 模型添加一个。
+          </p>
+        ) : null}
+        <p className="mt-2 text-center text-[11px] text-muted-foreground">
+          内容由 AI 生成，请自行核对
+          <span className="hidden sm:inline"> · Enter 发送，Shift+Enter 换行</span>
+          <span className="hidden md:inline"> · 自研 NDJSON 事件协议</span>
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -297,26 +389,21 @@ type BubbleProps = {
   streaming: boolean;
   editing: boolean;
   draft: string;
-  onDraftChange: (value: string) => void;
-  onEditStart: (message: ChatUIMessage) => void;
-  onEditCancel: () => void;
-  onEditSubmit: (id: string, text: string) => void;
-  onRegenerate: (id: string) => void;
-  onContinue: (id: string) => void;
+  actions: MessageActions;
 };
 
-function Bubble({
-  message,
-  streaming,
-  editing,
-  draft,
-  onDraftChange,
-  onEditStart,
-  onEditCancel,
-  onEditSubmit,
-  onRegenerate,
-  onContinue,
-}: BubbleProps) {
+/**
+ * 一条消息。**必须是 memo 的**。
+ *
+ * 生成时每来一个 token 都会换掉 messages 数组，但只有正在写的那一条是**新对象**
+ * 其余消息引用不变 —— 没有 memo 的话每次 token 都会把所有历史消息连同 markdown
+ * 一起重渲染一遍，长对话里这就是"越聊越卡"的来源。
+ */
+const Bubble = memo(function Bubble({ message, streaming, editing, draft, actions }: BubbleProps) {
+  const isStreamingThis = message.role !== "user" && streaming && Boolean(message.pending);
+  // 流式正文按帧率上限节流后再交给 markdown 解析器（见 useThrottledText）
+  const shownContent = useThrottledText(message.content, isStreamingThis);
+
   if (message.role === "user") {
     if (editing) {
       return (
@@ -326,15 +413,15 @@ function Bubble({
               // biome-ignore lint/a11y/noAutofocus: 进入编辑态就该直接能打字
               autoFocus
               value={draft}
-              onChange={(event) => onDraftChange(event.target.value)}
+              onChange={(event) => actions.updateEditDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
                   event.preventDefault();
-                  onEditCancel();
+                  actions.endEdit();
                 }
                 if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                   event.preventDefault();
-                  if (draft.trim()) onEditSubmit(message.id, draft);
+                  if (draft.trim()) actions.editAndResend(message.id, draft);
                 }
               }}
               rows={3}
@@ -346,14 +433,14 @@ function Bubble({
               </span>
               <button
                 type="button"
-                onClick={onEditCancel}
+                onClick={actions.endEdit}
                 className="rounded-lg px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
               >
                 取消
               </button>
               <button
                 type="button"
-                onClick={() => onEditSubmit(message.id, draft)}
+                onClick={() => actions.editAndResend(message.id, draft)}
                 disabled={!draft.trim()}
                 className="rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
               >
@@ -374,7 +461,7 @@ function Bubble({
           <CopyButton text={message.content} />
           <button
             type="button"
-            onClick={() => onEditStart(message)}
+            onClick={() => actions.beginEdit(message.id, message.content)}
             disabled={streaming}
             aria-label="编辑这条消息"
             title="编辑重发"
@@ -388,7 +475,6 @@ function Bubble({
     );
   }
 
-  const isStreamingThis = streaming && message.pending;
   const empty = !message.content && !message.thinking && !message.error;
 
   return (
@@ -412,7 +498,7 @@ function Bubble({
           translations={TRANSLATIONS}
           className="text-[15px] leading-7"
         >
-          {message.content}
+          {shownContent}
         </Streamdown>
       ) : null}
 
@@ -440,7 +526,7 @@ function Bubble({
           {message.content.trim() ? (
             <button
               type="button"
-              onClick={() => onContinue(message.id)}
+              onClick={() => actions.continueGeneration(message.id)}
               disabled={streaming}
               className="rounded-md bg-amber-500/15 px-2 py-0.5 font-medium transition-colors hover:bg-amber-500/25 disabled:opacity-40"
             >
@@ -454,7 +540,7 @@ function Bubble({
         {message.content ? <CopyButton text={message.content} /> : null}
         <button
           type="button"
-          onClick={() => onRegenerate(message.id)}
+          onClick={() => actions.regenerate(message.id)}
           disabled={streaming || empty}
           aria-label="重新生成"
           title="重新生成"
@@ -471,6 +557,62 @@ function Bubble({
       </div>
     </div>
   );
+});
+
+/**
+ * 流式正文节流。
+ *
+ * Streamdown 每次拿到新字符串都要重新解析整段 markdown（含代码高亮）。token 是
+ * 几毫秒一个的，逐 token 解析等于把主线程占满；这里按 intervalMs 限流，
+ * 让渲染跟着帧走而不是跟着 token 走。
+ *
+ * 两个关键点：
+ *   1. 流式结束立刻对齐最终正文 —— 最后几个字绝不能丢；
+ *   2. 节流窗口内的中间态不补渲染，只渲染"最新的那一份"（latestRef）。
+ */
+const STREAM_RENDER_INTERVAL_MS = 80;
+
+function useThrottledText(text: string, active: boolean) {
+  const [shown, setShown] = useState(text);
+  const latestRef = useRef(text);
+  const lastRef = useRef(0);
+  const timerRef = useRef<number | null>(null);
+  latestRef.current = text;
+
+  useEffect(() => {
+    if (!active) {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      lastRef.current = 0;
+      setShown(latestRef.current);
+      return;
+    }
+
+    const now = performance.now();
+    const waited = now - lastRef.current;
+    if (waited >= STREAM_RENDER_INTERVAL_MS) {
+      lastRef.current = now;
+      setShown(latestRef.current);
+      return;
+    }
+    if (timerRef.current !== null) return;
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      lastRef.current = performance.now();
+      setShown(latestRef.current);
+    }, STREAM_RENDER_INTERVAL_MS - waited);
+  }, [text, active]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return active ? shown : text;
 }
 
 function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {

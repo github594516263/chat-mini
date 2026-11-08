@@ -118,13 +118,19 @@ check("刷新 → URL 不跳走", s.path === `/c/${targetId}`, s.path);
 check("刷新 → 内容和刷新前一致", s.title === expectedTitle && s.bubbles > 0, `h1 = ${s.title}, ${s.bubbles} 条`);
 
 // ---------------------------------------------------------------- 404
+// 界面挂在 layout，服务端已无会话内容可拦 → 改由客户端渲染 not-found 态
 const fakeId = "00000000-0000-4000-8000-000000000000";
 await goto(`${baseUrl}/c/${fakeId}`);
+await sleep(1400);
 s = await state();
 check(
-  "不存在的会话 → 404（不泄露存在性）",
-  s.text.includes("404") || s.text.includes("could not be found"),
-  s.text.replace(/\s+/g, " ").slice(0, 60),
+  "不存在的会话 → 显示「会话不存在」（不泄露存在性）",
+  s.text.includes("会话不存在"),
+  s.text.replace(/\s+/g, " ").slice(0, 40),
+);
+check(
+  "不存在的会话 → 不渲染聊天界面（不装作一条空会话）",
+  (await evaluate(`!document.querySelector('[data-composer]')`)) === true,
 );
 
 // ---------------------------------------------------------------- 游客路径

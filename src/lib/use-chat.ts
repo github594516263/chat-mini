@@ -131,14 +131,34 @@ export function useChat(
   const [streamingIds, setStreamingIds] = useState<string[]>([]);
   /** 输入框草稿按会话存：切走再回来还在 */
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /**
+   * 正在编辑的那条消息，也按会话存。
+   * 不这么做的话，切走再回来编辑框就没了 —— 草稿能活、编辑态不能活，
+   * 这种"一半有记忆一半没有"最让人困惑。
+   */
+  const [editing, setEditing] = useState<Record<string, { messageId: string; draft: string }>>({});
   const [hydrated, setHydrated] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  /**
+   * URL 里的 id 在服务端不存在（或不属于你）时记在这里。
+   *
+   * 为什么不在服务端 notFound()：界面挂在 layout 上，page 是空壳，
+   * 服务端已经没有任何"会话内容"可以拦，拦下来也只会得到
+   * 「404 页面 + layout 里照常渲染的聊天界面」这种怪异组合。
+   * 所以存在性判断交给客户端：拉一次 /api/sessions/[id]，404 就进入 not-found 态。
+   */
+  const [missingSessionId, setMissingSessionId] = useState<string | null>(null);
 
   /**
    * 每个会话各自的订阅。sessionId → 这一路的 controller / 服务端 run / 是否用户手动停。
    * 只掐订阅不掐生成：断掉之后服务端还在跑，回来能续上。
    */
   const runsRef = useRef<Map<string, RunEntry>>(new Map());
+  /**
+   * 每条会话的滚动位置。滚动位置本质是 DOM 状态，page 重建就会归零，
+   * 所以只能由 Provider 记着 —— 但它跟"消息内容"一样属于视图记忆，不该进 URL。
+   */
+  const scrollMemoryRef = useRef<Map<string, number>>(new Map());
   const resumedRef = useRef<Set<string>>(new Set());
   const stateRef = useRef<{ sessions: ChatSession[]; activeId: string | null }>({
     sessions: [],
@@ -256,6 +276,51 @@ export function useChat(
     },
     [activeId],
   );
+
+  // ---------------------------------------------------------------- 编辑态（按会话）
+
+  const editState = activeId ? (editing[activeId] ?? null) : null;
+
+  const beginEdit = useCallback(
+    (messageId: string, content: string) => {
+      if (!activeId) return;
+      setEditing((prev) => ({ ...prev, [activeId]: { messageId, draft: content } }));
+    },
+    [activeId],
+  );
+
+  const updateEditDraft = useCallback(
+    (draft: string) => {
+      if (!activeId) return;
+      setEditing((prev) => {
+        const current = prev[activeId];
+        if (!current) return prev;
+        return { ...prev, [activeId]: { ...current, draft } };
+      });
+    },
+    [activeId],
+  );
+
+  /** 退出编辑态（取消 / 提交都走这里） */
+  const endEdit = useCallback(() => {
+    if (!activeId) return;
+    setEditing((prev) => {
+      if (!(activeId in prev)) return prev;
+      const next = { ...prev };
+      delete next[activeId];
+      return next;
+    });
+  }, [activeId]);
+
+  // ---------------------------------------------------------------- 滚动位置（按会话）
+
+  const rememberScroll = useCallback((sessionId: string, top: number) => {
+    scrollMemoryRef.current.set(sessionId, top);
+  }, []);
+
+  const recallScroll = useCallback((sessionId: string): number | null => {
+    return scrollMemoryRef.current.get(sessionId) ?? null;
+  }, []);
 
   const updateSession = useCallback(
     (sessionId: string, updater: (session: ChatSession) => ChatSession) => {
@@ -873,23 +938,37 @@ export function useChat(
    */
   const syncFromUrl = useCallback(
     (sessionId: string | null) => {
-      if (!sessionId) return;
+      if (!sessionId) {
+        setMissingSessionId(null);
+        return;
+      }
       setActiveId((current) => (current === sessionId ? current : sessionId));
 
       const list = stateRef.current.sessions;
-      if (list.some((s) => s.id === sessionId)) return;
+      if (list.some((s) => s.id === sessionId)) {
+        setMissingSessionId(null);
+        return;
+      }
       if (!remote || list.length === 0) return; // 游客 / 列表还没水合完
 
       void (async () => {
         try {
           const response = await fetch(`/api/sessions/${sessionId}`);
-          if (!response.ok) return;
+          if (!response.ok) {
+            // 404 = 不存在或不属于你，两种都不泄露
+            setMissingSessionId(sessionId);
+            return;
+          }
           const data = (await readJsonResponse(response)) as { session?: ApiSession };
-          if (!data.session) return;
+          if (!data.session) {
+            setMissingSessionId(sessionId);
+            return;
+          }
           const fetched = toUiSession(data.session);
+          setMissingSessionId(null);
           setSessions((prev) => (prev.some((s) => s.id === sessionId) ? prev : [fetched, ...prev]));
         } catch {
-          // 拉不到就算了：消息接口还会再失败一次，界面会显示空会话
+          // 网络错误不等于不存在：保持未知状态，别误报 404
         }
       })();
     },
@@ -971,6 +1050,13 @@ export function useChat(
         delete next[sessionId];
         return next;
       });
+      setEditing((prev) => {
+        if (!(sessionId in prev)) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      scrollMemoryRef.current.delete(sessionId);
 
       if (remote) {
         void fetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {
@@ -1033,8 +1119,15 @@ export function useChat(
     streamingIds,
     draft,
     setDraft,
+    editState,
+    beginEdit,
+    updateEditDraft,
+    endEdit,
+    rememberScroll,
+    recallScroll,
     hydrated,
     messagesLoading,
+    missingSessionId,
     send,
     stop,
     regenerate,

@@ -60,13 +60,19 @@ export function ChatView() {
     continueGeneration,
     draft: input,
     setDraft: setInput,
+    editState,
+    beginEdit,
+    updateEditDraft,
+    endEdit,
+    rememberScroll,
+    recallScroll,
   } = chat;
-
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLElement>(null);
+  /** 刚切到哪条会话：用来区分"切过来"和"同一条会话里长出新内容" */
+  const restoreForRef = useRef<string | null>(null);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -75,16 +81,36 @@ export function ChatView() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [input]);
 
+  // 切会话：标记这次需要恢复位置（位置本身存在 Provider 里）
   useEffect(() => {
-    if (messages.length === 0) return;
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages]);
-
-  // 切会话时退出编辑态。输入框草稿不清 —— 它按会话存在 Provider 里。
-  useEffect(() => {
-    setEditingId(null);
-    setEditDraft("");
+    restoreForRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !activeId) return;
+
+    if (restoreForRef.current !== activeId) {
+      // 同一条会话里内容变长：只在用户本来贴着底部时才跟随，
+      // 否则会把正在往上翻的人硬拉回来
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+      if (nearBottom) el.scrollTop = el.scrollHeight;
+      return;
+    }
+
+    // 刚切过来（或消息刚拉到）：有记忆就回到原位置，没记忆就贴底
+    restoreForRef.current = null;
+    el.scrollTop = recallScroll(activeId) ?? el.scrollHeight;
+  }, [activeId, messages, recallScroll]);
+
+  // 滚动时把位置记进 Provider —— DOM 会随页面重建，这里才是能活下来的地方
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !activeId) return;
+    const onScroll = () => rememberScroll(activeId, el.scrollTop);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [activeId, rememberScroll]);
 
   // 这里原本挂了一个 beforeunload 拦截（生成中刷新就弹"更改可能未保存"）。
   // 后来两种模式都能续传了，这个拦截就变成纯粹的骚扰：
@@ -127,7 +153,7 @@ export function ChatView() {
         </span>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-y-auto">
+      <main ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         {!hydrated || (messagesLoading && messages.length === 0) ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             正在加载会话…
@@ -147,20 +173,13 @@ export function ChatView() {
                 <Bubble
                   message={message}
                   streaming={streaming}
-                  editing={editingId === message.id}
-                  draft={editDraft}
-                  onDraftChange={setEditDraft}
-                  onEditStart={(target) => {
-                    setEditingId(target.id);
-                    setEditDraft(target.content);
-                  }}
-                  onEditCancel={() => {
-                    setEditingId(null);
-                    setEditDraft("");
-                  }}
+                  editing={editState?.messageId === message.id}
+                  draft={editState?.draft ?? ""}
+                  onDraftChange={updateEditDraft}
+                  onEditStart={(target) => beginEdit(target.id, target.content)}
+                  onEditCancel={endEdit}
                   onEditSubmit={(id, text) => {
-                    setEditingId(null);
-                    setEditDraft("");
+                    endEdit();
                     void editAndResend(id, text);
                   }}
                   onRegenerate={(id) => void regenerate(id)}
@@ -178,6 +197,7 @@ export function ChatView() {
           <div className="flex items-end gap-2 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
             <textarea
               ref={textareaRef}
+              data-composer="1"
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {

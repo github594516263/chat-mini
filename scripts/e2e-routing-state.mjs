@@ -3,7 +3,7 @@
 //
 // 需要 live key（会真的发两次很短的请求，验证"切走之后订阅还在跑"）。
 
-import { prepareFixtures, purgeFixtures } from "./lib/e2e-fixture.mjs";
+import { createFixtureSession, prepareFixtures, purgeFixtures } from "./lib/e2e-fixture.mjs";
 
 const baseUrl = (process.argv[2] ?? "http://127.0.0.1:3123").replace(/\/$/, "");
 const { userId, A: fx, B: fy } = await prepareFixtures();
@@ -42,7 +42,10 @@ await call("Network.enable");
 
 const evaluate = async (expression) => {
   const r = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-  if (r.exceptionDetails) throw new Error(r.exceptionDetails.text);
+  if (r.exceptionDetails) {
+    const detail = r.exceptionDetails.exception?.description ?? r.exceptionDetails.text;
+    throw new Error(`${detail}`);
+  }
   return r.result.value;
 };
 const waitFor = async (expression, timeout = 25000) => {
@@ -227,6 +230,125 @@ check(
 await evaluate("history.back(); true");
 await sleep(1200);
 check("删除后按后退 → 不会回到已删会话", (await path()) !== `/c/${victim}`, await path());
+
+// ---------------------------------------------------------------- 滚动位置与编辑态跨切换保持
+// 需要一条"长到能滚"的会话，否则滚动位置没有意义
+const longBody = Array.from({ length: 40 }, (_, i) => `第 ${i + 1} 段：这里是一段用来把页面撑高的正文，重复若干次以便验证滚动位置。`).join("\n\n");
+const LONG = await createFixtureSession(userId, "长会话", ["请把下面这段读完", longBody]);
+
+await goto(`${baseUrl}/c/${LONG.id}`);
+await waitFor(`document.querySelectorAll('[data-role]').length >= 2`, 20000);
+await sleep(600);
+
+const canScroll = await evaluate(`(() => {
+  const el = document.querySelector('main');
+  return el ? el.scrollHeight > el.clientHeight + 100 : false;
+})()`);
+check("长会话正文可滚动（前提成立）", canScroll);
+
+await evaluate(`(() => { const el = document.querySelector('main'); el.scrollTop = 320; return el.scrollTop; })()`);
+await sleep(400);
+const scrollBefore = await evaluate(`document.querySelector('main').scrollTop`);
+
+// 切走再切回
+await click(`[data-session-id="${B}"]`);
+await waitFor(`location.pathname === '/c/${B}'`, 15000);
+await sleep(500);
+await click(`[data-session-id="${LONG.id}"]`);
+await waitFor(`location.pathname === '/c/${LONG.id}'`, 15000);
+await sleep(900);
+const scrollAfter = await evaluate(`document.querySelector('main').scrollTop`);
+check(
+  "切走再切回 → 滚动位置保持",
+  Math.abs(scrollAfter - scrollBefore) <= 60,
+  `${scrollBefore} → ${scrollAfter}`,
+);
+
+// 编辑态跨切换保持
+await evaluate(`document.querySelector('button[aria-label="编辑这条消息"]')?.click(); true`);
+const editOpened = await waitFor(`!!document.querySelector('main textarea')`, 8000);
+check("编辑框已打开（前提成立）", editOpened);
+await evaluate(`(() => {
+  const el = document.querySelector('main textarea');
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+  setter.call(el, '改成这段文字-保持测试');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()`);
+await sleep(300);
+
+await click(`[data-session-id="${B}"]`);
+await waitFor(`location.pathname === '/c/${B}'`, 15000);
+await sleep(500);
+const editGoneInB = await evaluate(`!document.querySelector('main textarea')`);
+check("切到别的会话 → 那边的编辑框不串过来", editGoneInB);
+
+await click(`[data-session-id="${LONG.id}"]`);
+await waitFor(`location.pathname === '/c/${LONG.id}'`, 15000);
+await sleep(900);
+const editBack = await evaluate(`document.querySelector('main textarea')?.value ?? null`);
+check(
+  "切走再切回 → 编辑框和改过的文字都还在",
+  editBack === "改成这段文字-保持测试",
+  editBack ?? "(编辑框没了)",
+);
+
+// ---------------------------------------------------------------- 零重建：切会话后 DOM 节点还是同一个
+// 这是"视图挂在 layout"这个结构的核心断言：不是"看起来没闪"，而是同一个节点实例。
+await click(`[data-session-id="${B}"]`);
+await waitFor(`location.pathname === '/c/${B}'`, 15000);
+await sleep(800);
+
+// 在 A 里打好字（草稿按会话存，所以必须在 A 上打），记下节点引用
+await click(`[data-session-id="${A}"]`);
+await waitFor(`location.pathname === '/c/${A}'`, 15000);
+await sleep(600);
+await evaluate(`(() => {
+  const el = document.querySelector('[data-composer]');
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+  setter.call(el, '光标位置测试-ABCDE');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.focus();
+  el.setSelectionRange(4, 4);
+  window.__mainEl = document.querySelector('main');
+  window.__taEl = el;
+  return true;
+})()`);
+await sleep(200);
+const draftBefore = await evaluate(`({ value: window.__taEl.value, caret: window.__taEl.selectionStart })`);
+
+// 切到 B，再切回 A
+await click(`[data-session-id="${B}"]`);
+await waitFor(`location.pathname === '/c/${B}'`, 15000);
+await sleep(600);
+await click(`[data-session-id="${A}"]`);
+await waitFor(`location.pathname === '/c/${A}'`, 15000);
+await sleep(800);
+
+const same = await evaluate(`({
+  main: window.__mainEl === document.querySelector('main'),
+  textarea: window.__taEl === document.querySelector('[data-composer]'),
+  value: window.__taEl?.value ?? null,
+  caret: window.__taEl?.selectionStart ?? null,
+  connected: window.__taEl?.isConnected === true,
+  focused: document.activeElement === window.__taEl,
+})`);
+check("切会话后 <main> 是同一个 DOM 节点（没有重建）", same.main === true);
+check("切会话后输入框是同一个 DOM 节点（没有重建）", same.textarea === true);
+check(
+  "切会话后草稿的值还在（按会话隔离）",
+  same.value === draftBefore.value,
+  `切前 "${draftBefore.value}" → 切后 "${same.value}"`,
+);
+// 受控 textarea 换值后光标必然回到末尾（浏览器行为，不是重建导致）。
+// 真要记住光标位置得自己存 selectionStart，目前判断不值得 —— 记录在案。
+check(
+  "光标落在末尾（受控 textarea 换值的固有行为，已在文档记录）",
+  same.caret === same.value.length,
+  `caret=${same.caret} len=${same.value.length}`,
+);
+check("切会话后旧节点没有被销毁", same.connected === true);
+check("切会话后焦点没有被打断（仍在输入框）", same.focused === true);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n通过 ${results.length - failed.length}/${results.length}`);

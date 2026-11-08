@@ -266,6 +266,46 @@ URL： 新建 → /c/<真id>；删除 → 立刻离开已删 id；后退不回�
 
 ---
 
+### Step 8 · 视图层上移：真正的「零重建」 —— ✅ 已完成（2026-11-08）
+
+对照 `vercel/ai-chatbot`（同栈同构：`(chat)` 路由组 + `/chat/[id]`）发现的差距：
+**它的路由页是 `return null`，整个聊天界面挂在 layout 上。** 我们之前把 `ChatView` 留在 page 里，
+所以切会话等于重建一次界面（输入框重算高度、滚动归零、失焦）。
+
+改动：
+
+| 文件 | 改了什么 |
+|---|---|
+| `(chat)/layout.tsx` | 不变（仍只做 auth + live） |
+| `components/chat-shell.tsx` | 直接渲染 `<ChatView />`；`children`（页面）退化为空壳 |
+| `(chat)/page.tsx` | 变成 `return null`（草稿态没有界面，界面在 layout） |
+| `(chat)/c/[id]/page.tsx` | 变成 `return null`（不再渲染 ChatView） |
+| `lib/use-chat.ts` | 新增 `missingSessionId`：URL id 拉不到 404 时记下来 |
+| `components/chat-shell.tsx` | 新增 `SessionNotFound` 视图；`syncFromUrl` 的 effect 依赖加上 `hydrated` |
+| `components/chat-view.tsx` | composer 加 `data-composer` 标记（测试稳定性） |
+
+**实测量到的是"同一个 DOM 节点"，不是"看起来没闪"**：
+
+```
+✅ 切会话后 <main> 是同一个 DOM 节点（没有重建）
+✅ 切会话后输入框是同一个 DOM 节点（没有重建）
+✅ 切会话后草稿的值还在（按会话隔离）  — 切前 "光标位置测试-ABCDE" → 切后 "光标位置测试-ABCDE"
+✅ 切会话后焦点没有被打断（仍在输入框）
+```
+
+**404 语义随之改变（必须记录）**：
+- 视图不在 page 里了，服务端 `notFound()` 只会得到「404 页 + layout 里照常渲染的聊天界面」这种自相矛盾的画面
+- 所以存在性判断搬到客户端：`ChatShell` 发现 URL id 不在列表里 → 拉 `/api/sessions/[id]` → 404 就渲染 **「会话不存在」** 面板，且**不渲染输入框**（不装作一条空会话）
+- `/api/sessions/[id]` 的服务端 404 语义不变；RSC payload 对所有 id 完全一致，不泄露存在性
+
+**已知小偏差**：切回某条会话时，草稿文本在，但光标落在末尾 —— 受控 textarea 换值的固有行为
+（要记住光标得自己存 `selectionStart`，判断不值得，已在测试里断言并注释）。
+
+**验收**：15/15（深链）+ 28/28（状态/零重建）+ 9/9（并发）+ 7/7（鉴权）
++ 21/21（服务端全链路）+ actions/resume/chat/sidebar 全通过。
+
+---
+
 ## 决策记录
 
 | 日期 | 决策 | 结论 |
@@ -277,3 +317,6 @@ URL： 新建 → /c/<真id>；删除 → 立刻离开已删 id；后退不回�
 | 2026-11-08 | 生成状态用布尔还是按会话 | **按会话集合**：全局布尔会让后台会话把当前会话的按钮变灰 |
 | 2026-11-08 | 单订阅还是按会话多订阅 | **`Map<sessionId, RunEntry>`**：否则"别的会话在生成"会静默吃掉发送 |
 | 2026-11-08 | 切会话是否 abort 订阅 | **否**：状态在 Provider 里，订阅继续跑，切回来即完整正文 |
+| 2026-11-08 | 视图放 page 还是 layout | **layout**：放 page 会随参数变化被卸载重建（实测：放 layout 后 `<main>` 与输入框是同一个 DOM 节点） |
+| 2026-11-08 | 404 谁来判 | **客户端**：服务端 `notFound()` 会和 layout 里的界面同时出现，自相矛盾；改由 ChatShell 拉 `/api/sessions/[id]` 判 404 |
+| 2026-11-08 | 是否开 `cacheComponents` | **暂不开**：视图已上移，Activity 保活（3 条上限）收益被覆盖；PPR 外壳另算，等阶段 1 |

@@ -1,5 +1,6 @@
 import { ChatShell } from "@/components/chat-shell";
 import { getCurrentUser } from "@/lib/auth";
+import { getUserModelCatalog } from "@/lib/model-config";
 import { getModelCatalog } from "@/lib/models";
 
 export const dynamic = "force-dynamic";
@@ -11,11 +12,22 @@ export const dynamic = "force-dynamic";
  * 所以切会话时流式订阅不断、草稿不丢，而 page 子树该重建就重建。
  */
 export default async function ChatLayout({ children }: { children: React.ReactNode }) {
-  // 模型目录在服务端生成：哪些 provider 配了 key、默认选哪个，只让服务端说了算。
-  // 客户端拿到的只有公开 id / 名字 / 状态，没有 key 和 base URL。
-  const catalog = getModelCatalog();
-  const live = catalog.groups.some((group) => group.status === "live");
   const user = await getCurrentUser();
+
+  // 登录用户：目录来自自己的 provider/model 表；游客：仍用环境变量目录。
+  // 两边都只下发布公开 id / 名字 / 状态，没有 key 和 base URL。
+  let catalog = getModelCatalog();
+  if (user) {
+    try {
+      catalog = await getUserModelCatalog(user.id);
+    } catch (error) {
+      // 新表还没建/数据库抖动：不要让整页 500，也不要偷偷回退到系统目录，
+      // 否则登录用户会看到不属于自己的模型。设置页会显示具体错误。
+      console.error("[models] 读取账户模型目录失败:", error);
+      catalog = { groups: [], defaultId: "", mock: false, origin: "none" };
+    }
+  }
+  const live = catalog.groups.some((group) => group.status === "live");
 
   return (
     <ChatShell

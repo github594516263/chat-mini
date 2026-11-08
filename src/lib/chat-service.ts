@@ -1,4 +1,4 @@
-import { resolveModel } from "@/lib/models";
+import { resolveModelForUser } from "@/lib/model-config";
 import type { ChatEvent, WireMessage } from "@/lib/protocol";
 import { providerForModel } from "@/lib/providers";
 import type { ChatProvider } from "@/lib/providers/base";
@@ -80,16 +80,21 @@ export async function startGeneration(
   const session = await getSession(userId, sessionId);
   if (!session) return { ok: false, status: 404, message: "会话不存在" };
 
-  const model = resolveModel(modelId);
+  const model = await resolveModelForUser(userId, modelId);
   if (!model) {
-    return { ok: false, status: 400, message: "未知模型", hint: "模型 id 不在服务端目录里" };
+    return {
+      ok: false,
+      status: 400,
+      message: "当前账户还没有可用的模型",
+      hint: "打开设置 → 模型，添加一个 provider 和模型；或者在设置里显式启用系统默认模型。",
+    };
   }
   if (model.status === "off") {
     return {
       ok: false,
       status: 400,
       message: `${model.provider.label} 还没有配置`,
-      hint: `在 .env.local 里补 ${model.provider.keyEnv} 和 ${model.provider.baseUrlEnv}`,
+      hint: "检查这家 provider 的 API 密钥和地址，确认模型已启用。",
     };
   }
 

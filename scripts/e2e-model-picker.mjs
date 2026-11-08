@@ -120,6 +120,9 @@ const options = () =>
 
 await call("Page.navigate", { url: `${baseUrl}/` });
 await sleep(3200);
+// 这个脚本验的是游客目录；如果浏览器里还留着上一个脚本的登录态，先退出。
+await evaluate(`fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})`);
+await sleep(300);
 await evaluate(`localStorage.removeItem(${JSON.stringify(MODEL_KEY)})`);
 await call("Page.reload");
 await sleep(3000);

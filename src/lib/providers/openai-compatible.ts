@@ -17,31 +17,34 @@ type CompatibleChunk = {
 };
 
 export type OpenAICompatibleOptions = {
-  apiKey: string;
+  /** null = 这个端点不需要 Authorization（本地/内网无鉴权网关） */
+  apiKey: string | null;
   /** 完整地址，已经补到 /chat/completions */
   endpoint: string;
   model: string;
+  /** 单次输出上限；null/undefined 时不发 max_tokens */
+  maxTokens?: number | null;
   /** 出错时告诉用户是哪一家，而不是笼统的 "请求失败" */
   label: string;
 };
 
 export function openAICompatibleProvider(options: OpenAICompatibleOptions): ChatProvider {
-  const { apiKey, endpoint, model, label } = options;
+  const { apiKey, endpoint, model, maxTokens, label } = options;
 
   return async function* ({ messages, signal }) {
     let response: Response;
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
       response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
+        headers,
         body: JSON.stringify({
           model,
           messages,
           stream: true,
           stream_options: { include_usage: true },
+          ...(maxTokens ? { max_tokens: maxTokens } : {}),
         }),
         signal,
       });

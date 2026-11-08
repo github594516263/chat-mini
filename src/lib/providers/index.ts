@@ -14,11 +14,12 @@ import { openAICompatibleProvider } from "@/lib/providers/openai-compatible";
  */
 export function providerForModel(model: ResolvedModel): ChatProvider {
   if (model.status === "mock") return fakeProvider;
-  if (model.status === "live" && model.apiKey && model.endpoint) {
+  if (model.status === "live" && model.endpoint) {
     return openAICompatibleProvider({
       apiKey: model.apiKey,
       endpoint: model.endpoint,
       model: model.definition.upstream,
+      maxTokens: model.maxOutputTokens ?? null,
       label: model.provider.label,
     });
   }

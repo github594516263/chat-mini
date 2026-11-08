@@ -4,6 +4,7 @@ import { useEffect, type ReactNode } from "react";
 import {
   Brain,
   Check,
+  Cpu,
   Info,
   LogOut,
   Palette,
@@ -18,6 +19,7 @@ import { logoutRequest } from "@/lib/client-auth";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { useModelContext } from "@/components/model-context";
+import { ModelsPane } from "@/components/models-settings";
 
 /**
  * 设置面板（框架版）。
@@ -25,10 +27,17 @@ import { useModelContext } from "@/components/model-context";
  * 和"待接入的"分开标好了，接后端时只替换对应那一块，不用动布局。
  */
 
-export type SettingsSection = "general" | "appearance" | "account" | "memory" | "about";
+export type SettingsSection =
+  | "general"
+  | "models"
+  | "appearance"
+  | "account"
+  | "memory"
+  | "about";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: typeof Info; hint: string }[] = [
   { id: "general", label: "通用", icon: SlidersHorizontal, hint: "启动页、发送方式、语言" },
+  { id: "models", label: "模型", icon: Cpu, hint: "每个账户自己的 provider 与模型" },
   { id: "appearance", label: "外观", icon: Palette, hint: "浅色 / 深色 / 跟随系统" },
   { id: "account", label: "账号与安全", icon: ShieldCheck, hint: "资料、密码、登录状态" },
   { id: "memory", label: "记忆与进化", icon: Brain, hint: "长期记忆与偏好自学习" },
@@ -159,6 +168,7 @@ export function SettingsDialog({
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
             {section === "general" ? <GeneralPane /> : null}
+            {section === "models" ? <ModelsPane user={user} /> : null}
             {section === "appearance" ? (
               <AppearancePane mode={themeMode} onChange={onThemeChange} />
             ) : null}

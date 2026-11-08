@@ -230,7 +230,8 @@ export function ChatView() {
               <button
                 type="button"
                 onClick={streaming ? stop : submit}
-                disabled={!streaming && !input.trim()}
+                disabled={!streaming && (!input.trim() || !model.selectedId)}
+                title={!model.selectedId ? "先在设置 → 模型里配置一个模型" : undefined}
                 aria-label={streaming ? "停止生成" : "发送"}
                 className={cn(
                   "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
@@ -247,6 +248,11 @@ export function ChatView() {
               </button>
             </div>
           </div>
+          {!model.selectedId ? (
+            <p className="mt-2 text-center text-[11px] text-amber-600">
+              还没有可用模型。点输入框右侧的「配置模型」，或打开设置 → 模型添加一个。
+            </p>
+          ) : null}
           <p className="mt-2 text-center text-[11px] text-muted-foreground">
             内容由 AI 生成，请自行核对
             <span className="hidden sm:inline"> · Enter 发送，Shift+Enter 换行</span>

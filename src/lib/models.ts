@@ -59,6 +59,8 @@ export type PublicModel = {
   description?: string;
   capabilities?: ModelCapability[];
   status: ModelStatus;
+  /** 来自系统目录（环境变量），不是用户自己配的 */
+  system?: boolean;
 };
 
 export type PublicProviderGroup = {
@@ -66,6 +68,8 @@ export type PublicProviderGroup = {
   label: string;
   status: ModelStatus;
   models: PublicModel[];
+  /** 系统目录分组（只读），用于和用户自建 provider 区分 */
+  system?: boolean;
 };
 
 export type ModelCatalog = {
@@ -73,6 +77,8 @@ export type ModelCatalog = {
   defaultId: string;
   /** 全站是否处于「没有任何 provider 配置」的演示模式 */
   mock: boolean;
+  /** user=账户自建目录；system=显式启用的系统默认；none=没配且没启用系统目录 */
+  origin?: "user" | "system" | "none";
 };
 
 /** 服务端解析结果：多带路由需要的字段，绝不下发到客户端 */
@@ -83,6 +89,7 @@ export type ResolvedModel = {
   apiKey: string | null;
   /** 已经补全到 /chat/completions 的完整地址 */
   endpoint: string | null;
+  maxOutputTokens?: number | null;
 };
 
 /**
@@ -279,6 +286,7 @@ export function getModelCatalog(): ModelCatalog {
   return {
     defaultId: runtime.defaultId,
     mock: runtime.mock,
+    origin: "system",
     groups: runtime.groups.map((group) => ({
       id: group.state.config.id,
       label: group.state.config.label,

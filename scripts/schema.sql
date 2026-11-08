@@ -76,6 +76,78 @@ CREATE TABLE IF NOT EXISTS messages (
   CONSTRAINT fk_msg_session FOREIGN KEY (session_id) REFERENCES chat_sessions (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- ---------------------------------------------------------------- 账户级模型配置
+-- 每个用户自己的一套 provider / model；A 配的模型 B 看不到。
+-- API Key 单独放 model_credentials，provider 行里永远不出现明文。
+CREATE TABLE IF NOT EXISTS model_providers (
+  id          CHAR(36)     NOT NULL,
+  user_id     CHAR(36)     NOT NULL,
+  name        VARCHAR(64)  NOT NULL,
+  protocol    VARCHAR(32)  NOT NULL DEFAULT 'openai-chat',
+  base_url    VARCHAR(512) NOT NULL,
+  auth_type   ENUM('api_key','none','oauth') NOT NULL DEFAULT 'api_key',
+  enabled     TINYINT(1)   NOT NULL DEFAULT 1,
+  sort_order  INT          NOT NULL DEFAULT 0,
+  revision    INT          NOT NULL DEFAULT 1,
+  created_at  DATETIME(3)  NOT NULL,
+  updated_at  DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_model_provider_user_name (user_id, name),
+  KEY idx_model_provider_user (user_id, enabled, sort_order),
+  CONSTRAINT fk_model_provider_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS model_credentials (
+  provider_id   CHAR(36)        NOT NULL,
+  user_id       CHAR(36)        NOT NULL,
+  kind          ENUM('api_key','oauth') NOT NULL,
+  secret_cipher VARBINARY(4096) NOT NULL,
+  iv            VARBINARY(12)   NOT NULL,
+  tag           VARBINARY(16)   NOT NULL,
+  key_version   SMALLINT        NOT NULL DEFAULT 1,
+  last4         CHAR(4)         NULL,
+  expires_at    DATETIME(3)     NULL,
+  created_at    DATETIME(3)     NOT NULL,
+  updated_at    DATETIME(3)     NOT NULL,
+  PRIMARY KEY (provider_id),
+  CONSTRAINT fk_model_credential_provider FOREIGN KEY (provider_id) REFERENCES model_providers (id) ON DELETE CASCADE,
+  CONSTRAINT fk_model_credential_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS models (
+  id                CHAR(36)     NOT NULL,
+  user_id           CHAR(36)     NOT NULL,
+  provider_id       CHAR(36)     NOT NULL,
+  model_key         VARCHAR(191) NOT NULL COMMENT '真正发给上游的模型名',
+  display_name      VARCHAR(120) NOT NULL,
+  context_window    INT UNSIGNED NULL,
+  max_output_tokens INT UNSIGNED NULL,
+  input_modalities  JSON         NOT NULL COMMENT '["text"]，以后可加 image',
+  reasoning_levels  JSON         NULL COMMENT 'P4：档位 → 协议参数值',
+  default_reasoning VARCHAR(32)  NULL,
+  enabled           TINYINT(1)   NOT NULL DEFAULT 1,
+  sort_order        INT          NOT NULL DEFAULT 0,
+  source            ENUM('manual','discovered','seed') NOT NULL DEFAULT 'manual',
+  created_at        DATETIME(3)  NOT NULL,
+  updated_at        DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_model_provider_key (provider_id, model_key),
+  KEY idx_model_user (user_id, enabled, sort_order),
+  CONSTRAINT fk_model_provider FOREIGN KEY (provider_id) REFERENCES model_providers (id) ON DELETE CASCADE,
+  CONSTRAINT fk_model_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS user_model_preferences (
+  user_id           CHAR(36)    NOT NULL,
+  default_model_id  CHAR(36)    NULL,
+  default_reasoning VARCHAR(32) NULL,
+  use_system_models TINYINT(1)  NOT NULL DEFAULT 0 COMMENT '没配模型时是否显式启用系统默认目录',
+  updated_at        DATETIME(3) NOT NULL,
+  PRIMARY KEY (user_id),
+  CONSTRAINT fk_model_pref_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_model_pref_model FOREIGN KEY (default_model_id) REFERENCES models (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 -- ---------------------------------------------------------------- 生成任务
 -- 只存元信息：事件明细留在进程内存（逐条落库没有意义，见 README）。
 -- 启动时把 status='running' 的行清理掉，并把对应消息标成 interrupted。

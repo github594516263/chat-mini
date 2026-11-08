@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, ChevronUp } from "lucide-react";
+import { Check, ChevronUp, Settings2 } from "lucide-react";
 
+import { useAppShell } from "@/components/app-shell";
 import type { PublicModel, PublicProviderGroup } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
@@ -26,6 +27,7 @@ type ModelPickerProps = {
 };
 
 export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
+  const { openSettings } = useAppShell();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -34,6 +36,12 @@ export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // 账户目录为空时，按钮的职责从「选模型」变成「去配置模型」
+  const available = useMemo(
+    () => groups.flatMap((group) => group.models).filter((model) => model.status !== "off"),
+    [groups],
+  );
 
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();
@@ -162,11 +170,25 @@ export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => (open ? close() : setOpen(true))}
-        aria-label={selected ? `当前模型：${selected.label}，点击切换` : "选择模型"}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls="model-picker-list"
+        onClick={() => {
+          if (available.length === 0) {
+            openSettings("models");
+            return;
+          }
+          if (open) close();
+          else setOpen(true);
+        }}
+        aria-label={
+          available.length === 0
+            ? "还没有可用模型，去设置"
+            : selected
+              ? `当前模型：${selected.label}，点击切换`
+              : "选择模型"
+        }
+        aria-haspopup={available.length === 0 ? undefined : "listbox"}
+        aria-expanded={available.length === 0 ? undefined : open}
+        aria-controls={available.length === 0 ? undefined : "model-picker-list"}
+        title={available.length === 0 ? "还没有配置模型，点击去设置" : undefined}
         className={cn(
           "flex h-9 max-w-[60vw] min-w-0 items-center gap-1.5 rounded-full px-2 text-[12px] transition-colors sm:max-w-[280px]",
           open
@@ -174,7 +196,10 @@ export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
             : "text-muted-foreground hover:bg-muted hover:text-foreground",
         )}
       >
-        <span className="truncate font-medium">{selected?.label ?? "选择模型"}</span>
+        {available.length === 0 ? <Settings2 size={13} className="shrink-0" /> : null}
+        <span className="truncate font-medium">
+          {selected?.label ?? (available.length === 0 ? "配置模型" : "选择模型")}
+        </span>
         {selected?.badge ? (
           <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary tabular-nums">
             {selected.badge}
@@ -190,6 +215,7 @@ export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
           className={cn(
             "shrink-0 text-muted-foreground transition-transform duration-150",
             open && "rotate-180",
+            available.length === 0 && "hidden",
           )}
         />
       </button>

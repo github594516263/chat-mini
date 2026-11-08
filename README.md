@@ -26,6 +26,8 @@ cp .env.example .env.local
 # 官方：DEEPSEEK_API_KEY=sk-xxx
 # 中转站/自建网关：再加一行 DEEPSEEK_BASE_URL=https://xxx.com（或 https://xxx.com/v1）
 # 想同时挂多家：在 models.ts 里加目录项，再填对应的 *_API_KEY / *_BASE_URL
+# 账户级模型配置的密钥加密：MODEL_SECRET_KEY=<32 字节 base64>
+# 本地网关（默认禁止）：ALLOW_PRIVATE_MODEL_ENDPOINTS=false
 ```
 
 侧栏顶部（移动端在标题栏右侧）的 `mock` / `live` 徽标会告诉你当前走的是哪条路。
@@ -35,6 +37,23 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 
 模型切换器的完整设计（截图拆解、其他项目的做法、状态放哪、怎么加 provider）见
 **[docs/model-switcher.md](docs/model-switcher.md)**。
+
+账户级模型管理（配置哪些模型就显示哪些、密钥只写、按 user_id 隔离）的 DSH 拆解与库表/API 方案见
+**[docs/model-management.md](docs/model-management.md)**。
+
+登录后从「设置 → 模型」进入：添加 OpenAI 兼容的 provider（名称 + API 地址 + 密钥），
+再往它的目录里加模型 ID。保存后，输入框的模型菜单**只显示你自己启用的模型**；
+没有配置时是空状态，只有显式打开「没有可用自定义模型时，使用系统默认模型」才会回退到环境变量目录。
+provider 卡片里有「测试连接」：会请求上游 `/models`，显示延迟和发现的模型，可勾选后一键导入。
+API Key 用 `MODEL_SECRET_KEY` 做 AES-256-GCM 加密，接口只回 `hasKey` 和末四位；
+`base_url` 默认拒绝 localhost/内网，避免服务端被当成 SSRF 跳板。
+游客仍然使用 `models.ts` + 环境变量的系统目录，不受影响。
+
+自检脚本：
+`node scripts/e2e-model-config.mjs`（API 隔离/加密/SSRF）、
+`node scripts/e2e-models-ui.mjs`（设置页 CRUD + composer 空状态，需先起无头 Chrome）、
+`node scripts/e2e-model-discovery.mjs`（真实 `/models` 发现/导入）、
+`node scripts/e2e-discovery-ui.mjs`（设置页发现 UI）。
 
 ![模型切换器](docs/model-picker.png)
 
@@ -65,6 +84,10 @@ node scripts/e2e-sessions-api.mjs         # 23 项会话接口检查（隔离/�
 node scripts/e2e-chat-server.mjs          # 21 项服务端生成检查（落库/取消/重启降级）
 node scripts/e2e-logged-in.mjs            # 19 项浏览器实测（需先起无头 Chrome，见脚本头）
 node scripts/e2e-model-picker.mjs         # 25 项模型切换检查（搜索/键盘/持久化/请求体）
+node scripts/e2e-model-config.mjs         # 47 项账户模型 API 检查（隔离/加密/SSRF/并发）
+node scripts/e2e-models-ui.mjs            # 22 项账户模型设置页检查（CRUD/空状态/回退开关）
+node scripts/e2e-model-discovery.mjs      # 21 项上游 /models 发现与批量导入
+node scripts/e2e-discovery-ui.mjs         # 10 项设置页「测试连接 / 一键导入」
 ```
 
 生成的两条路径（同一个 `POST /api/chat`）：

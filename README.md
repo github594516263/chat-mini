@@ -42,7 +42,9 @@ key 无效时不会静默失败，错误会以一条 `error` 事件推到界面�
 **[docs/model-management.md](docs/model-management.md)**。
 
 登录后从「设置 → 模型」进入：添加 OpenAI 兼容的 provider（名称 + API 地址 + 密钥），
-再往它的目录里加模型 ID。保存后，输入框的模型菜单**只显示你自己启用的模型**；
+再往它的目录里加模型 ID。模型行可以配置推理等级（名称 + 上游参数值 + 默认档位），
+配好后输入框的模型菜单左侧会出现档位选择，请求按选中的档位发送 `reasoning_effort`。
+保存后，输入框的模型菜单**只显示你自己启用的模型**；
 没有配置时是空状态，只有显式打开「没有可用自定义模型时，使用系统默认模型」才会回退到环境变量目录。
 provider 卡片里有「测试连接」：会请求上游 `/models`，显示延迟和发现的模型，可勾选后一键导入。
 API Key 用 `MODEL_SECRET_KEY` 做 AES-256-GCM 加密，接口只回 `hasKey` 和末四位；
@@ -51,7 +53,7 @@ API Key 用 `MODEL_SECRET_KEY` 做 AES-256-GCM 加密，接口只回 `hasKey` �
 
 自检脚本：
 `node scripts/e2e-model-config.mjs`（API 隔离/加密/SSRF）、
-`node scripts/e2e-models-ui.mjs`（设置页 CRUD + composer 空状态，需先起无头 Chrome）、
+`node scripts/e2e-models-ui.mjs`（设置页 CRUD + 推理等级 + composer 空状态，需先起无头 Chrome）、
 `node scripts/e2e-model-discovery.mjs`（真实 `/models` 发现/导入）、
 `node scripts/e2e-discovery-ui.mjs`（设置页发现 UI）。
 
@@ -84,9 +86,9 @@ node scripts/e2e-sessions-api.mjs         # 23 项会话接口检查（隔离/�
 node scripts/e2e-chat-server.mjs          # 21 项服务端生成检查（落库/取消/重启降级）
 node scripts/e2e-logged-in.mjs            # 19 项浏览器实测（需先起无头 Chrome，见脚本头）
 node scripts/e2e-model-picker.mjs         # 25 项模型切换检查（搜索/键盘/持久化/请求体）
-node scripts/e2e-model-config.mjs         # 47 项账户模型 API 检查（隔离/加密/SSRF/并发）
-node scripts/e2e-models-ui.mjs            # 22 项账户模型设置页检查（CRUD/空状态/回退开关）
-node scripts/e2e-model-discovery.mjs      # 21 项上游 /models 发现与批量导入
+node scripts/e2e-model-config.mjs         # 58 项账户模型 API 检查（隔离/加密/SSRF/并发/推理等级）
+node scripts/e2e-models-ui.mjs            # 25 项账户模型设置页检查（CRUD/推理等级/回退开关）
+node scripts/e2e-model-discovery.mjs      # 26 项上游 /models 发现与批量导入
 node scripts/e2e-discovery-ui.mjs         # 10 项设置页「测试连接 / 一键导入」
 ```
 

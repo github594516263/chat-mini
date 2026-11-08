@@ -119,6 +119,8 @@ export function useChat(
      * 生成到一半切模型，这条回答仍然用发起时的模型跑完，符合直觉。
      */
     modelId?: string | null;
+    /** 当前模型选中的推理等级 id；null 表示用模型默认档位 */
+    reasoningId?: string | null;
   } = {},
 ) {
   const userId = options.user?.id ?? null;
@@ -170,6 +172,7 @@ export function useChat(
    * 不用 state 依赖：否则每换一次模型，所有 send/regenerate 回调都要重建。
    */
   const modelRef = useRef<string | null>(options.modelId ?? null);
+  const reasoningRef = useRef<string | null>(options.reasoningId ?? null);
   const stateRef = useRef<{ sessions: ChatSession[]; activeId: string | null }>({
     sessions: [],
     activeId: null,
@@ -178,6 +181,10 @@ export function useChat(
   useEffect(() => {
     modelRef.current = options.modelId ?? null;
   }, [options.modelId]);
+
+  useEffect(() => {
+    reasoningRef.current = options.reasoningId ?? null;
+  }, [options.reasoningId]);
 
   useEffect(() => {
     stateRef.current = { sessions, activeId };
@@ -562,6 +569,7 @@ export function useChat(
           body: JSON.stringify({
             messages: payload,
             ...(modelRef.current ? { model: modelRef.current } : {}),
+            ...(reasoningRef.current ? { reasoning: reasoningRef.current } : {}),
           }),
           signal: controller.signal,
         });
@@ -626,6 +634,7 @@ export function useChat(
             sessionId,
             ...body,
             ...(modelRef.current ? { model: modelRef.current } : {}),
+            ...(reasoningRef.current ? { reasoning: reasoningRef.current } : {}),
           }),
         });
         const data = (await readJsonResponse(response)) as {

@@ -26,13 +26,14 @@ import type {
   ModelSettingsProvider,
   ProviderStatus,
 } from "@/lib/model-config";
+import type { ReasoningLevel } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
 /**
  * 设置 → 模型。
  *
- * 只做 CRUD：provider 行、展开卡片、模型行。
- * 推理档位 / 图片输入 / 模型发现按约定放到 P4，这里不提前长出来。
+ * provider 行、展开卡片、模型行，以及推理等级。
+ * 图片输入 / OAuth 按约定放到 P4c，这里不提前长出来。
  */
 
 const INPUT =
@@ -61,6 +62,8 @@ type ModelDraft = {
   contextWindow: string;
   maxOutputTokens: string;
   enabled: boolean;
+  reasoningLevels: ReasoningLevel[];
+  defaultReasoning: string;
 };
 
 function providerDraftOf(provider: ModelSettingsProvider): ProviderDraft {
@@ -80,6 +83,8 @@ function modelDraftOf(model: ModelSettingsModel): ModelDraft {
     contextWindow: model.contextWindow === null ? "" : String(model.contextWindow),
     maxOutputTokens: model.maxOutputTokens === null ? "" : String(model.maxOutputTokens),
     enabled: model.enabled,
+    reasoningLevels: model.reasoningLevels.map((level) => ({ ...level })),
+    defaultReasoning: model.defaultReasoning ?? "",
   };
 }
 
@@ -89,7 +94,9 @@ function sameModelDraft(a: ModelDraft, b: ModelDraft): boolean {
     a.displayName === b.displayName &&
     a.contextWindow === b.contextWindow &&
     a.maxOutputTokens === b.maxOutputTokens &&
-    a.enabled === b.enabled
+    a.enabled === b.enabled &&
+    a.defaultReasoning === b.defaultReasoning &&
+    JSON.stringify(a.reasoningLevels) === JSON.stringify(b.reasoningLevels)
   );
 }
 
@@ -451,7 +458,7 @@ export function ModelsPane({ user }: { user: AccountUser | null }) {
       </div>
 
       <p className="px-0.5 text-[11px] leading-5 text-muted-foreground">
-        P4b 再加：推理等级、图片输入、OAuth。现在只支持 OpenAI Chat Completions。
+        P4c 再加：图片输入、OAuth。现在只支持 OpenAI Chat Completions。
       </p>
     </div>
   );
@@ -1004,6 +1011,9 @@ function ProviderCard({
                               model.maxOutputTokens
                                 ? `${Math.round(model.maxOutputTokens / 1000)}K out`
                                 : null,
+                              model.reasoningLevels.length > 0
+                                ? `推理 ${model.reasoningLevels.map((level) => level.label).join("/")}`
+                                : null,
                               model.ownedBy,
                             ]
                               .filter(Boolean)
@@ -1061,8 +1071,39 @@ function ModelRow({
   onDelete: () => void;
 }) {
   const [draft, setDraft] = useState<ModelDraft>(() => modelDraftOf(model));
-  useEffect(() => setDraft(modelDraftOf(model)), [model.id, model.modelKey, model.displayName, model.contextWindow, model.maxOutputTokens, model.enabled]);
+  useEffect(() => setDraft(modelDraftOf(model)), [model.id, model.modelKey, model.displayName, model.contextWindow, model.maxOutputTokens, model.enabled, model.reasoningLevels, model.defaultReasoning]);
   const dirty = !sameModelDraft(draft, modelDraftOf(model));
+
+  const addReasoningLevel = () => {
+    let index = draft.reasoningLevels.length + 1;
+    while (draft.reasoningLevels.some((level) => level.id === `level-${index}`)) index += 1;
+    const next = { id: `level-${index}`, label: "", value: "" };
+    setDraft({
+      ...draft,
+      reasoningLevels: [...draft.reasoningLevels, next],
+      defaultReasoning: draft.defaultReasoning || next.id,
+    });
+  };
+
+  const updateReasoningLevel = (index: number, patch: Partial<ReasoningLevel>) => {
+    setDraft({
+      ...draft,
+      reasoningLevels: draft.reasoningLevels.map((level, current) =>
+        current === index ? { ...level, ...patch } : level,
+      ),
+    });
+  };
+
+  const removeReasoningLevel = (index: number) => {
+    const removed = draft.reasoningLevels[index];
+    const reasoningLevels = draft.reasoningLevels.filter((_, current) => current !== index);
+    setDraft({
+      ...draft,
+      reasoningLevels,
+      defaultReasoning:
+        draft.defaultReasoning === removed?.id ? (reasoningLevels[0]?.id ?? "") : draft.defaultReasoning,
+    });
+  };
 
   return (
     <div className="rounded-lg border border-border/80 bg-background p-2.5">
@@ -1107,6 +1148,76 @@ function ModelRow({
         </label>
       </div>
 
+      <div className="mt-2 rounded-lg border border-border/70 bg-muted/10 p-2">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-[11px] font-medium text-foreground">推理等级</p>
+            <p className="text-[10px] text-muted-foreground">
+              配了才会在输入框旁边出现档位选择；请求里发 reasoning_effort。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={addReasoningLevel}
+            disabled={draft.reasoningLevels.length >= 8}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[10px] text-foreground transition-colors hover:bg-muted disabled:opacity-40"
+          >
+            <Plus size={10} />
+            添加等级
+          </button>
+        </div>
+
+        {draft.reasoningLevels.length === 0 ? (
+          <p className="mt-2 text-[10px] text-muted-foreground">
+            没有配置；这个模型不会发送推理参数。
+          </p>
+        ) : (
+          <div className="mt-2 space-y-1.5">
+            {draft.reasoningLevels.map((level, index) => (
+              <div key={level.id} className="flex items-center gap-1.5">
+                <input
+                  value={level.label}
+                  onChange={(event) => updateReasoningLevel(index, { label: event.target.value })}
+                  placeholder="名称，例如 高"
+                  aria-label={`推理等级 ${index + 1} 名称`}
+                  className={cn(INPUT, "h-7 min-w-0 flex-1 text-[11px]")}
+                />
+                <input
+                  value={level.value}
+                  onChange={(event) => updateReasoningLevel(index, { value: event.target.value })}
+                  placeholder="上游值，例如 high"
+                  aria-label={`推理等级 ${index + 1} 参数值`}
+                  className={cn(INPUT, "h-7 min-w-0 flex-1 font-mono text-[11px]")}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeReasoningLevel(index)}
+                  aria-label={`删除推理等级 ${level.label || level.id}`}
+                  className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-rose-500/10 hover:text-rose-600"
+                >
+                  <Trash2 size={11} />
+                </button>
+              </div>
+            ))}
+            <label className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+              默认档位
+              <select
+                value={draft.defaultReasoning}
+                onChange={(event) => setDraft({ ...draft, defaultReasoning: event.target.value })}
+                className={cn(INPUT, "h-7 w-auto min-w-[9rem] text-[11px]")}
+              >
+                <option value="">第一个等级</option>
+                {draft.reasoningLevels.map((level) => (
+                  <option key={level.id} value={level.id}>
+                    {level.label || level.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+      </div>
+
       <div className="mt-2 flex items-center justify-between gap-2">
         <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <input
@@ -1136,6 +1247,8 @@ function ModelRow({
                 contextWindow: draft.contextWindow,
                 maxOutputTokens: draft.maxOutputTokens,
                 enabled: draft.enabled,
+                reasoningLevels: draft.reasoningLevels,
+                defaultReasoning: draft.defaultReasoning || null,
               })
             }
             className="rounded-lg bg-muted px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted/70 disabled:opacity-40"
@@ -1163,6 +1276,8 @@ function AddModelForm({
     contextWindow: "",
     maxOutputTokens: "",
     enabled: true,
+    reasoningLevels: [],
+    defaultReasoning: "",
   });
 
   return (

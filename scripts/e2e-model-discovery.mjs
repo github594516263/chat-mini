@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const baseUrl = process.env.BASE_URL ?? "http://127.0.0.1:3123";
-const username = process.env.E2E_USER ?? "demo";
+const username = process.env.E2E_USER ?? "demo2";
 const password = process.env.E2E_PASS ?? "DemoPass2026!";
 
 function loadEnv() {
@@ -72,7 +72,7 @@ try {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
-  check(login.status === 200, "登录 demo");
+  check(login.status === 200, "登录测试账号");
 
   // 清掉上次失败留下的同名 provider
   const before = await request("/api/models/providers");
@@ -136,6 +136,9 @@ try {
     check(typeof first.modelKey === "string" && first.modelKey.length > 0, "模型有 id");
     check(Array.isArray(first.inputModalities), "模型有输入类型");
     check(first.contextWindow === null || typeof first.contextWindow === "number", "上下文窗口类型正确");
+    check(Array.isArray(first.reasoningLevels), "模型有推理等级");
+    check(first.reasoningLevels.length > 0, "DeepSeek 返回了推理等级", String(first.reasoningLevels.length));
+    check(typeof first.defaultReasoning === "string" || first.defaultReasoning === null, "默认推理等级类型正确");
   }
 
   const picked = models.slice(0, 2);
@@ -148,6 +151,8 @@ try {
         contextWindow: model.contextWindow,
         maxOutputTokens: model.maxOutputTokens,
         inputModalities: model.inputModalities,
+        reasoningLevels: model.reasoningLevels,
+        defaultReasoning: model.defaultReasoning,
       })),
     }),
   });
@@ -162,6 +167,16 @@ try {
       saved.models[0].contextWindow === picked[0].contextWindow,
       "上下文窗口跟着发现结果写入",
       `${saved.models[0].contextWindow}`,
+    );
+    check(
+      (saved.models[0].reasoningLevels?.length ?? 0) === (picked[0].reasoningLevels?.length ?? 0),
+      "推理等级跟着发现结果写入",
+      `${saved.models[0].reasoningLevels?.length}`,
+    );
+    check(
+      saved.models[0].defaultReasoning === picked[0].defaultReasoning,
+      "默认推理等级跟着发现结果写入",
+      `${saved.models[0].defaultReasoning}`,
     );
   }
 

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { ModelCatalog, PublicModel, PublicProviderGroup } from "@/lib/models";
+import type { ModelCatalog, PublicModel, PublicProviderGroup, ReasoningLevel } from "@/lib/models";
 
 /**
  * 模型选择的前端状态。
@@ -17,9 +17,30 @@ import type { ModelCatalog, PublicModel, PublicProviderGroup } from "@/lib/model
  */
 
 const KEY_PREFIX = "chat-mini/model/v1";
+const REASONING_PREFIX = "chat-mini/reasoning/v1";
 
 function keyOf(scope: string): string {
   return `${KEY_PREFIX}/${scope}`;
+}
+
+function reasoningKeyOf(scope: string, modelId: string): string {
+  return `${REASONING_PREFIX}/${scope}/${modelId}`;
+}
+
+function readSavedReasoning(scope: string, modelId: string): string | null {
+  try {
+    return window.localStorage.getItem(reasoningKeyOf(scope, modelId));
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedReasoning(scope: string, modelId: string, id: string) {
+  try {
+    window.localStorage.setItem(reasoningKeyOf(scope, modelId), id);
+  } catch {
+    // 写不进去就只在本次会话里生效
+  }
 }
 
 function readSaved(scope: string): string | null {
@@ -45,6 +66,10 @@ export type ModelSelection = {
   selected: PublicModel | null;
   selectedId: string | null;
   select: (id: string) => void;
+  reasoningLevels: ReasoningLevel[];
+  reasoning: string | null;
+  reasoningValue: string | null;
+  setReasoning: (id: string) => void;
 };
 
 export function useModelSelection(catalog: ModelCatalog, scope = "guest"): ModelSelection {
@@ -106,11 +131,44 @@ export function useModelSelection(catalog: ModelCatalog, scope = "guest"): Model
     [models, selectedId, defaultModel],
   );
 
+  const reasoningLevels = useMemo(() => selected?.reasoningLevels ?? [], [selected]);
+  const [reasoning, setReasoningId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selected || reasoningLevels.length === 0) {
+      setReasoningId(null);
+      return;
+    }
+    const saved = readSavedReasoning(scope, selected.id);
+    const fallback =
+      (selected.defaultReasoning &&
+      reasoningLevels.some((level) => level.id === selected.defaultReasoning)
+        ? selected.defaultReasoning
+        : null) ?? reasoningLevels[0]?.id ?? null;
+    setReasoningId(saved && reasoningLevels.some((level) => level.id === saved) ? saved : fallback);
+  }, [selected, reasoningLevels, scope]);
+
+  const setReasoning = useCallback(
+    (id: string) => {
+      if (!selected || !reasoningLevels.some((level) => level.id === id)) return;
+      setReasoningId(id);
+      writeSavedReasoning(scope, selected.id, id);
+    },
+    [selected, reasoningLevels, scope],
+  );
+
+  const reasoningValue =
+    reasoningLevels.find((level) => level.id === reasoning)?.value ?? null;
+
   return {
     groups,
     models,
     selected,
     selectedId: selected?.id ?? null,
     select,
+    reasoningLevels,
+    reasoning,
+    reasoningValue,
+    setReasoning,
   };
 }

@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS models (
   context_window    INT UNSIGNED NULL,
   max_output_tokens INT UNSIGNED NULL,
   input_modalities  JSON         NOT NULL COMMENT '["text"]，以后可加 image',
-  reasoning_levels  JSON         NULL COMMENT 'P4：档位 → 协议参数值',
+  reasoning_levels  JSON         NULL COMMENT '推理档位：[{id,label,value}]，value 发给上游',
   default_reasoning VARCHAR(32)  NULL,
   enabled           TINYINT(1)   NOT NULL DEFAULT 1,
   sort_order        INT          NOT NULL DEFAULT 0,

@@ -9,6 +9,7 @@ import {
   resolveModel,
   toChatCompletionsUrl,
   type ModelCatalog,
+  type ReasoningLevel,
   type ResolvedModel,
 } from "@/lib/models";
 
@@ -34,6 +35,8 @@ export type ModelSettingsModel = {
   contextWindow: number | null;
   maxOutputTokens: number | null;
   inputModalities: string[];
+  reasoningLevels: ReasoningLevel[];
+  defaultReasoning: string | null;
   enabled: boolean;
   status: "live" | "off";
 };
@@ -96,6 +99,7 @@ type ModelRow = RowDataPacket & {
   max_output_tokens: number | null;
   input_modalities: unknown;
   reasoning_levels: unknown;
+  default_reasoning: string | null;
   enabled: number | boolean;
   source: string;
   created_at: Date;
@@ -130,6 +134,74 @@ function parseJsonArray(value: unknown): string[] {
     }
   }
   return [];
+}
+
+function parseReasoningLevels(value: unknown): ReasoningLevel[] {
+  let raw = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+
+  const seen = new Set<string>();
+  const levels: ReasoningLevel[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as { id?: unknown; label?: unknown; value?: unknown };
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    const valueText = typeof record.value === "string" ? record.value.trim() : "";
+    if (!id || !valueText || seen.has(id)) continue;
+    seen.add(id);
+    const label = typeof record.label === "string" && record.label.trim() ? record.label.trim() : id;
+    levels.push({ id, label, value: valueText });
+  }
+  return levels;
+}
+
+function normalizeReasoningLevels(value: unknown): ReasoningLevel[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new ModelConfigError(400, "推理等级必须是数组");
+  }
+  if (value.length > 8) {
+    throw new ModelConfigError(400, "最多配置 8 个推理等级");
+  }
+
+  const seen = new Set<string>();
+  const levels: ReasoningLevel[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      throw new ModelConfigError(400, "每个推理等级都要有 id、label、value");
+    }
+    const record = item as { id?: unknown; label?: unknown; value?: unknown };
+    const id = cleanText(record.id, "推理等级 id", 32);
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id)) {
+      throw new ModelConfigError(400, "推理等级 id 只能用小写字母、数字、-、_");
+    }
+    if (seen.has(id)) throw new ModelConfigError(400, `推理等级 id 重复：${id}`);
+    seen.add(id);
+    const label = cleanText(record.label, "推理等级名称", 32);
+    const levelValue = cleanText(record.value, "推理等级参数值", 64);
+    levels.push({ id, label, value: levelValue });
+  }
+  return levels;
+}
+
+function normalizeDefaultReasoning(value: unknown, levels: ReasoningLevel[]): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw new ModelConfigError(400, "默认推理等级必须是 id");
+  }
+  const id = value.trim();
+  if (!id) return null;
+  if (!levels.some((level) => level.id === id)) {
+    throw new ModelConfigError(400, "默认推理等级不在已配置的等级里");
+  }
+  return id;
 }
 
 function cleanText(value: unknown, field: string, max: number): string {
@@ -301,6 +373,8 @@ function toModelView(row: ModelRow): ModelSettingsModel {
     contextWindow: row.context_window === null ? null : Number(row.context_window),
     maxOutputTokens: row.max_output_tokens === null ? null : Number(row.max_output_tokens),
     inputModalities: parseJsonArray(row.input_modalities),
+    reasoningLevels: parseReasoningLevels(row.reasoning_levels),
+    defaultReasoning: row.default_reasoning ?? null,
     enabled,
     status: enabled ? "live" : "off",
   };
@@ -348,7 +422,7 @@ const PROVIDER_SELECT = `
 
 const MODEL_SELECT = `
   SELECT id, provider_id, model_key, display_name, context_window, max_output_tokens,
-         input_modalities, reasoning_levels, enabled, source, created_at
+         input_modalities, reasoning_levels, default_reasoning, enabled, source, created_at
     FROM models
    WHERE user_id = ?
    ORDER BY sort_order ASC, created_at ASC`;
@@ -400,7 +474,7 @@ async function getProviderView(userId: string, providerId: string): Promise<Mode
 async function getModelView(userId: string, modelId: string): Promise<ModelSettingsModel | null> {
   const row = await queryOne<ModelRow>(
     `SELECT id, provider_id, model_key, display_name, context_window, max_output_tokens,
-            input_modalities, reasoning_levels, enabled, source, created_at
+            input_modalities, reasoning_levels, default_reasoning, enabled, source, created_at
        FROM models
       WHERE id = ? AND user_id = ?
       LIMIT 1`,
@@ -574,6 +648,8 @@ export type CreateModelInput = {
   contextWindow?: unknown;
   maxOutputTokens?: unknown;
   enabled?: unknown;
+  reasoningLevels?: unknown;
+  defaultReasoning?: unknown;
 };
 
 export async function createModel(
@@ -598,6 +674,8 @@ export async function createModel(
     throw new ModelConfigError(400, "最大输出 token 数不能大于上下文窗口");
   }
   const enabled = input.enabled === undefined ? true : Boolean(input.enabled);
+  const reasoningLevels = normalizeReasoningLevels(input.reasoningLevels);
+  const defaultReasoning = normalizeDefaultReasoning(input.defaultReasoning, reasoningLevels);
   const id = randomUUID();
   const now = new Date();
 
@@ -606,7 +684,7 @@ export async function createModel(
       `INSERT INTO models
          (id, user_id, provider_id, model_key, display_name, context_window, max_output_tokens,
           input_modalities, reasoning_levels, default_reasoning, enabled, sort_order, source, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, 'manual', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'manual', ?, ?)`,
       [
         id,
         userId,
@@ -616,6 +694,8 @@ export async function createModel(
         contextWindow,
         maxOutputTokens,
         JSON.stringify(["text"]),
+        reasoningLevels.length > 0 ? JSON.stringify(reasoningLevels) : null,
+        defaultReasoning,
         enabled ? 1 : 0,
         now,
         now,
@@ -652,7 +732,7 @@ export async function updateModel(
 ): Promise<ModelSettingsModel | null> {
   const current = await queryOne<ModelRow>(
     `SELECT id, provider_id, model_key, display_name, context_window, max_output_tokens,
-            input_modalities, reasoning_levels, enabled, source, created_at
+            input_modalities, reasoning_levels, default_reasoning, enabled, source, created_at
        FROM models WHERE id = ? AND user_id = ? LIMIT 1`,
     [modelId, userId],
   );
@@ -669,18 +749,31 @@ export async function updateModel(
     throw new ModelConfigError(400, "最大输出 token 数不能大于上下文窗口");
   }
   const enabled = input.enabled === undefined ? bool(current.enabled) : Boolean(input.enabled);
+  const currentLevels = parseReasoningLevels(current.reasoning_levels);
+  const reasoningLevels =
+    input.reasoningLevels === undefined
+      ? currentLevels
+      : normalizeReasoningLevels(input.reasoningLevels);
+  const defaultReasoning =
+    input.defaultReasoning === undefined
+      ? current.default_reasoning && reasoningLevels.some((level) => level.id === current.default_reasoning)
+        ? current.default_reasoning
+        : null
+      : normalizeDefaultReasoning(input.defaultReasoning, reasoningLevels);
 
   try {
     await execute(
       `UPDATE models
           SET model_key = ?, display_name = ?, context_window = ?, max_output_tokens = ?,
-              enabled = ?, updated_at = ?
+              reasoning_levels = ?, default_reasoning = ?, enabled = ?, updated_at = ?
         WHERE id = ? AND user_id = ?`,
       [
         modelKey,
         displayName,
         contextWindow,
         maxOutputTokens,
+        reasoningLevels.length > 0 ? JSON.stringify(reasoningLevels) : null,
+        defaultReasoning,
         enabled ? 1 : 0,
         new Date(),
         modelId,
@@ -748,6 +841,8 @@ export async function getUserModelCatalog(userId: string): Promise<ModelCatalog>
           label: model.displayName,
           description: `${provider.name} · ${model.modelKey}`,
           status: "live" as const,
+          reasoningLevels: model.reasoningLevels,
+          defaultReasoning: model.defaultReasoning,
         })),
     }))
     .filter((group) => group.models.length > 0);
@@ -798,6 +893,8 @@ export type DiscoveredModel = {
   contextWindow: number | null;
   maxOutputTokens: number | null;
   inputModalities: string[];
+  reasoningLevels: ReasoningLevel[];
+  defaultReasoning: string | null;
 };
 
 export type DiscoveryResult = {
@@ -892,6 +989,8 @@ function parseDiscoveredModels(payload: unknown): DiscoveredModel[] {
           contextWindow: null,
           maxOutputTokens: null,
           inputModalities: ["text"],
+          reasoningLevels: [],
+          defaultReasoning: null,
         });
       }
       continue;
@@ -906,6 +1005,7 @@ function parseDiscoveredModels(payload: unknown): DiscoveredModel[] {
       context_window?: unknown;
       max_output_tokens?: unknown;
       input_modalities?: unknown;
+      effort?: unknown;
     };
     const key =
       typeof record.id === "string"
@@ -926,6 +1026,26 @@ function parseDiscoveredModels(payload: unknown): DiscoveredModel[] {
         )
       : [];
 
+    const effort =
+      record.effort && typeof record.effort === "object"
+        ? (record.effort as { supported_levels?: unknown; default_level?: unknown })
+        : null;
+    const supportedLevels = Array.isArray(effort?.supported_levels)
+      ? effort.supported_levels.filter(
+          (value): value is string => typeof value === "string" && value.trim().length > 0,
+        )
+      : [];
+    const reasoningLevels: ReasoningLevel[] = [];
+    const seenLevels = new Set<string>();
+    for (const rawLevel of supportedLevels.slice(0, 8)) {
+      const levelId = reasoningIdOf(rawLevel);
+      if (!levelId || seenLevels.has(levelId)) continue;
+      seenLevels.add(levelId);
+      reasoningLevels.push({ id: levelId, label: rawLevel.trim(), value: rawLevel.trim() });
+    }
+    const defaultLevel =
+      typeof effort?.default_level === "string" ? reasoningIdOf(effort.default_level) : null;
+
     push({
       modelKey,
       ownedBy: typeof owned === "string" ? owned : null,
@@ -933,6 +1053,11 @@ function parseDiscoveredModels(payload: unknown): DiscoveredModel[] {
       contextWindow,
       maxOutputTokens,
       inputModalities: inputModalities.length > 0 ? inputModalities : ["text"],
+      reasoningLevels,
+      defaultReasoning:
+        defaultLevel && reasoningLevels.some((level) => level.id === defaultLevel)
+          ? defaultLevel
+          : null,
     });
   }
   return models;
@@ -944,6 +1069,16 @@ function safeTokenCount(value: unknown): number | null {
     return null;
   }
   return number;
+}
+
+function reasoningIdOf(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .replace(/-+$/, "")
+    .slice(0, 32);
 }
 
 async function fetchProviderModels(baseUrl: string, apiKey: string | null): Promise<DiscoveryResult> {
@@ -1066,6 +1201,8 @@ export async function importProviderModels(
     contextWindow: number | null;
     maxOutputTokens: number | null;
     inputModalities: string[];
+    reasoningLevels: ReasoningLevel[];
+    defaultReasoning: string | null;
   }>();
 
   for (const item of input) {
@@ -1092,6 +1229,8 @@ export async function importProviderModels(
           .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
           .slice(0, 8)
       : [];
+    const reasoningLevels = normalizeReasoningLevels(record.reasoningLevels);
+    const defaultReasoning = normalizeDefaultReasoning(record.defaultReasoning, reasoningLevels);
 
     normalized.set(modelKey, {
       modelKey,
@@ -1099,6 +1238,8 @@ export async function importProviderModels(
       contextWindow,
       maxOutputTokens,
       inputModalities: inputModalities.length > 0 ? inputModalities : ["text"],
+      reasoningLevels,
+      defaultReasoning,
     });
   }
 
@@ -1120,7 +1261,7 @@ export async function importProviderModels(
         `INSERT INTO models
            (id, user_id, provider_id, model_key, display_name, context_window, max_output_tokens,
             input_modalities, reasoning_levels, default_reasoning, enabled, sort_order, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, 0, 'discovered', ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'discovered', ?, ?)`,
         [
           id,
           userId,
@@ -1130,6 +1271,8 @@ export async function importProviderModels(
           model.contextWindow,
           model.maxOutputTokens,
           JSON.stringify(model.inputModalities),
+          model.reasoningLevels.length > 0 ? JSON.stringify(model.reasoningLevels) : null,
+          model.defaultReasoning,
           now,
           now,
         ],
@@ -1145,7 +1288,7 @@ export async function importProviderModels(
 
   const rows = await query<ModelRow>(
     `SELECT id, provider_id, model_key, display_name, context_window, max_output_tokens,
-            input_modalities, reasoning_levels, enabled, source, created_at
+            input_modalities, reasoning_levels, default_reasoning, enabled, source, created_at
        FROM models
       WHERE id IN (${ids.map(() => "?").join(",")}) AND user_id = ?`,
     [...ids, userId],
@@ -1173,7 +1316,7 @@ export async function resolveUserModel(
     }
   >(
     `SELECT m.id, m.provider_id, m.model_key, m.display_name, m.context_window, m.max_output_tokens,
-            m.input_modalities, m.reasoning_levels, m.enabled, m.source, m.created_at,
+            m.input_modalities, m.reasoning_levels, m.default_reasoning, m.enabled, m.source, m.created_at,
             p.name AS provider_name, p.protocol AS provider_protocol, p.base_url AS provider_base_url,
             p.auth_type AS provider_auth_type, p.enabled AS provider_enabled,
             c.secret_cipher, c.iv, c.tag, c.key_version
@@ -1229,6 +1372,8 @@ export async function resolveUserModel(
     endpoint: toChatCompletionsUrl(row.provider_base_url),
     maxOutputTokens:
       row.max_output_tokens === null ? null : Number(row.max_output_tokens),
+    reasoningLevels: parseReasoningLevels(row.reasoning_levels),
+    defaultReasoning: row.default_reasoning ?? null,
   };
 }
 

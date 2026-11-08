@@ -1,6 +1,6 @@
 // 账户级模型配置 API 自检
 //   node scripts/e2e-model-config.mjs
-// 前置：dev 已启动（默认 3123）、demo 账号存在、scripts/schema.sql 已执行。
+// 前置：dev 已启动（默认 3123）、测试账号 demo2 存在（可用 E2E_USER 覆盖）、scripts/schema.sql 已执行。
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,8 @@ import mysql from "mysql2/promise";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const baseUrl = process.env.BASE_URL ?? "http://127.0.0.1:3123";
-const username = process.env.E2E_USER ?? "demo";
+const username = process.env.E2E_USER ?? "demo2";
+const crossUsername = process.env.E2E_CROSS_USER ?? "demo";
 const password = process.env.E2E_PASS ?? "DemoPass2026!";
 
 function loadEnv() {
@@ -85,7 +86,15 @@ try {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
-  check(login.status === 200, "登录 demo 成功", JSON.stringify(login.body));
+  check(login.status === 200, "登录测试账号成功", JSON.stringify(login.body));
+
+  // 清掉上次异常退出留下的测试 provider，避免默认模型/数量断言被污染
+  const leftovers = await request("/api/models/providers");
+  for (const item of leftovers.body?.providers ?? []) {
+    if (item.name.startsWith("[e2e]")) {
+      await request(`/api/models/providers/${item.id}`, { method: "DELETE" });
+    }
+  }
 
   const empty = await request("/api/models/providers");
   check(empty.status === 200, "读取 provider 列表");
@@ -171,6 +180,12 @@ try {
   modelId = addModel.body?.model?.id ?? null;
   check(addModel.body?.model?.contextWindow === 256000, "256K 解析为 256000");
   check(addModel.body?.model?.maxOutputTokens === 32000, "32K 解析为 32000");
+  check(
+    Array.isArray(addModel.body?.model?.reasoningLevels) &&
+      addModel.body.model.reasoningLevels.length === 0,
+    "新模型默认没有推理等级",
+  );
+  check(addModel.body?.model?.defaultReasoning === null, "新模型默认推理等级为空");
 
   const catalog = await request("/api/models/catalog");
   check(catalog.status === 200, "读取 catalog");
@@ -199,6 +214,62 @@ try {
   check(patchModel.body?.model?.contextWindow === 64000, "模型上下文窗口已更新");
   check(patchModel.body?.model?.enabled === false, "模型可以停用");
 
+  const reasoningLevels = [
+    { id: "low", label: "低", value: "low" },
+    { id: "high", label: "高", value: "high" },
+    { id: "max", label: "最高", value: "max" },
+  ];
+  const patchReasoning = await request(`/api/models/${modelId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      modelKey: "e2e-model",
+      displayName: "E2E 模型改名",
+      contextWindow: "64K",
+      maxOutputTokens: "8K",
+      enabled: true,
+      reasoningLevels,
+      defaultReasoning: "high",
+    }),
+  });
+  check(patchReasoning.status === 200, "保存推理等级", JSON.stringify(patchReasoning.body));
+  check(patchReasoning.body?.model?.reasoningLevels?.length === 3, "三个推理等级都保存");
+  check(patchReasoning.body?.model?.defaultReasoning === "high", "默认推理等级已保存");
+
+  const catalogWithReasoning = await request("/api/models/catalog");
+  const catalogModel = catalogWithReasoning.body?.groups
+    ?.flatMap((group) => group.models)
+    .find((model) => model.id === modelId);
+  check(catalogModel?.reasoningLevels?.length === 3, "catalog 下发推理等级");
+  check(catalogModel?.defaultReasoning === "high", "catalog 下发默认档位");
+
+  const badDefault = await request(`/api/models/${modelId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      modelKey: "e2e-model",
+      displayName: "E2E 模型改名",
+      contextWindow: "64K",
+      maxOutputTokens: "8K",
+      enabled: false,
+      reasoningLevels,
+      defaultReasoning: "nope",
+    }),
+  });
+  check(badDefault.status === 400, "拒绝不存在的默认推理等级", String(badDefault.status));
+
+  const duplicateLevel = await request(`/api/models/${modelId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      modelKey: "e2e-model",
+      displayName: "E2E 模型改名",
+      contextWindow: "64K",
+      maxOutputTokens: "8K",
+      enabled: false,
+      reasoningLevels: [reasoningLevels[0], reasoningLevels[0]],
+      defaultReasoning: "low",
+    }),
+  });
+  check(duplicateLevel.status === 400, "拒绝重复的推理等级 id", String(duplicateLevel.status));
+
   await request(`/api/models/${modelId}`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -210,16 +281,37 @@ try {
     }),
   });
 
-  // 换 demo2：看不到 demo 的配置，也不能改
+  const session = await request("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ title: "[e2e] reasoning" }),
+  });
+  const sessionId = session.body?.session?.id ?? null;
+  check(Boolean(sessionId), "创建推理校验用会话");
+  const badReasoningChat = await request("/api/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      sessionId,
+      kind: "send",
+      content: "hi",
+      model: modelId,
+      reasoning: "nope",
+    }),
+  });
+  check(badReasoningChat.status === 400, "聊天请求拒绝不存在的推理等级", String(badReasoningChat.status));
+  if (sessionId) {
+    await request(`/api/sessions/${sessionId}`, { method: "DELETE" });
+  }
+
+  // 换另一个账号：看不到当前账号的配置，也不能改
   const demo2Login = await request("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ username: "demo2", password }),
+    body: JSON.stringify({ username: crossUsername, password }),
   });
-  check(demo2Login.status === 200, "登录 demo2");
+  check(demo2Login.status === 200, "登录对照组账号");
   const demo2List = await request("/api/models/providers");
   check(
     !demo2List.body?.providers?.some((item) => item.id === providerId),
-    "demo2 看不到 demo 的 provider",
+    "对照组看不到当前账号的 provider",
   );
   const crossPatch = await request(`/api/models/providers/${providerId}`, {
     method: "PATCH",
@@ -232,25 +324,25 @@ try {
       enabled: true,
     }),
   });
-  check(crossPatch.status === 404, "demo2 改不了 demo 的 provider", String(crossPatch.status));
+  check(crossPatch.status === 404, "对照组改不了 provider", String(crossPatch.status));
   const crossDeleteModel = await request(`/api/models/${modelId}`, { method: "DELETE" });
-  check(crossDeleteModel.status === 404, "demo2 删不了 demo 的模型", String(crossDeleteModel.status));
+  check(crossDeleteModel.status === 404, "对照组删不了模型", String(crossDeleteModel.status));
   const crossDiscover = await request(`/api/models/providers/${providerId}/discover`, {
     method: "POST",
   });
-  check(crossDiscover.status === 404, "demo2 不能测试 demo 的连接", String(crossDiscover.status));
+  check(crossDiscover.status === 404, "对照组不能测试连接", String(crossDiscover.status));
   const crossImport = await request(`/api/models/providers/${providerId}/models/import`, {
     method: "POST",
     body: JSON.stringify({ models: [{ modelKey: "hijack" }] }),
   });
-  check(crossImport.status === 404, "demo2 不能往 demo 的目录导入", String(crossImport.status));
+  check(crossImport.status === 404, "对照组不能导入模型", String(crossImport.status));
 
   // 换回 demo 继续
   const demoLogin = await request("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
-  check(demoLogin.status === 200, "切回 demo");
+  check(demoLogin.status === 200, "切回测试账号");
 
   const update = await request(`/api/models/providers/${providerId}`, {
     method: "PATCH",

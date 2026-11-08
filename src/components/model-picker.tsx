@@ -5,7 +5,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Check, ChevronUp, Settings2 } from "lucide-react";
 
 import { useAppShell } from "@/components/app-shell";
-import type { PublicModel, PublicProviderGroup } from "@/lib/models";
+import type { PublicModel, PublicProviderGroup, ReasoningLevel } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
 /**
@@ -25,6 +25,36 @@ type ModelPickerProps = {
   selected: PublicModel | null;
   onSelect: (id: string) => void;
 };
+
+/** 输入框旁的推理档位选择；模型没配等级时整个组件不渲染 */
+export function ReasoningPicker({
+  levels,
+  value,
+  onChange,
+}: {
+  levels: ReasoningLevel[];
+  value: string | null;
+  onChange: (id: string) => void;
+}) {
+  if (levels.length === 0) return null;
+  return (
+    <label className="shrink-0">
+      <span className="sr-only">推理等级</span>
+      <select
+        value={value ?? levels[0]?.id ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-9 max-w-[7.5rem] rounded-full bg-muted/60 px-2 text-[11px] text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40"
+        title="推理等级"
+      >
+        {levels.map((level) => (
+          <option key={level.id} value={level.id}>
+            {level.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export function ModelPicker({ groups, selected, onSelect }: ModelPickerProps) {
   const { openSettings } = useAppShell();

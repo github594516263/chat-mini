@@ -9,7 +9,7 @@ import { useAppShell } from "@/components/app-shell";
 import { ThemeMenu } from "@/components/theme-menu";
 import { useChatContext } from "@/components/chat-context";
 import { useModelContext } from "@/components/model-context";
-import { ModelPicker } from "@/components/model-picker";
+import { ModelPicker, ReasoningPicker } from "@/components/model-picker";
 import type { ChatUIMessage } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
@@ -222,6 +222,11 @@ export function ChatView() {
             />
             {/* 窄屏放不下一行时，这组会整体折到第二行，而不是把输入框挤成三行 */}
             <div className="ml-auto flex items-center gap-1.5">
+              <ReasoningPicker
+                levels={model.reasoningLevels}
+                value={model.reasoning}
+                onChange={model.setReasoning}
+              />
               <ModelPicker
                 groups={model.groups}
                 selected={model.selected}

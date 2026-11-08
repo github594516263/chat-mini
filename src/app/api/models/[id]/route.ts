@@ -25,6 +25,8 @@ export async function PATCH(request: Request, context: Context) {
       contextWindow: body.contextWindow,
       maxOutputTokens: body.maxOutputTokens,
       enabled: body.enabled,
+      reasoningLevels: body.reasoningLevels,
+      defaultReasoning: body.defaultReasoning,
     });
     if (!model) return jsonError(404, "模型不存在");
     return Response.json({ model });

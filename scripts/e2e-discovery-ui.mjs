@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.CDP_PORT ?? 9223);
 const baseUrl = process.env.BASE_URL ?? "http://127.0.0.1:3123";
-const username = process.env.E2E_USER ?? "demo";
+const username = process.env.E2E_USER ?? "demo2";
 const password = process.env.E2E_PASS ?? "DemoPass2026!";
 
 function loadEnv() {
@@ -121,7 +121,7 @@ try {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: ${JSON.stringify(username)}, password: ${JSON.stringify(password)} }),
   }).then(async (response) => ({ status: response.status, body: await response.json() }))`);
-  check("登录 demo", login.status === 200);
+  check("登录测试账号", login.status === 200);
   await call("Page.reload");
   await sleep(2200);
 

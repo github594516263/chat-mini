@@ -1,4 +1,5 @@
 import { resolveModelForUser } from "@/lib/model-config";
+import { resolveReasoningValue } from "@/lib/models";
 import type { ChatEvent, WireMessage } from "@/lib/protocol";
 import { providerForModel } from "@/lib/providers";
 import type { ChatProvider } from "@/lib/providers/base";
@@ -76,6 +77,7 @@ export async function startGeneration(
   sessionId: string,
   op: GenerationOp,
   modelId?: string | null,
+  reasoning?: string | null,
 ): Promise<StartResult> {
   const session = await getSession(userId, sessionId);
   if (!session) return { ok: false, status: 404, message: "会话不存在" };
@@ -96,6 +98,11 @@ export async function startGeneration(
       message: `${model.provider.label} 还没有配置`,
       hint: "检查这家 provider 的 API 密钥和地址，确认模型已启用。",
     };
+  }
+
+  const reasoningResult = resolveReasoningValue(model, reasoning);
+  if (!reasoningResult.ok) {
+    return { ok: false, status: 400, message: reasoningResult.error };
   }
 
   try {
@@ -119,7 +126,7 @@ export async function startGeneration(
     // 故意不 await：POST 只负责把 runId 交出去
     void driveServerRun({
       run,
-      provider: providerForModel(model),
+      provider: providerForModel(model, reasoningResult.value),
       userId,
       sessionId,
       messageId: assistantMessage.id,

@@ -1,9 +1,9 @@
 // 账户模型设置 UI 自检
 //   node scripts/e2e-models-ui.mjs
-// 前置：dev 跑在 3123、headless Chrome 带 --remote-debugging-port=9223、demo 账号存在。
+// 前置：dev 跑在 3123、headless Chrome 带 --remote-debugging-port=9223、测试账号 demo2 存在。
 const port = Number(process.env.CDP_PORT ?? 9223);
 const baseUrl = process.env.BASE_URL ?? "http://127.0.0.1:3123";
-const username = process.env.E2E_USER ?? "demo";
+const username = process.env.E2E_USER ?? "demo2";
 const password = process.env.E2E_PASS ?? "DemoPass2026!";
 const providerName = `[e2e] UI 网关 ${Date.now().toString().slice(-5)}`;
 
@@ -108,7 +108,7 @@ try {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: ${JSON.stringify(username)}, password: ${JSON.stringify(password)} }),
   }).then(async (response) => ({ status: response.status, body: await response.json() }))`);
-  check("浏览器里登录 demo", login.status === 200, JSON.stringify(login.body));
+  check("浏览器里登录测试账号", login.status === 200, JSON.stringify(login.body));
   await call("Page.reload");
   await sleep(2600);
 
@@ -158,8 +158,27 @@ try {
   check("UI 添加模型成功", await waitFor(textIncludes("E2E UI 模型")));
   check("provider 状态变为已配置", await waitFor(textIncludes("已配置")));
 
+  await clickText("添加等级");
+  await sleep(250);
+  await setInput("名称，例如 高", "高");
+  await setInput("上游值，例如 high", "high");
+  await clickText("保存");
+  check("UI 保存推理等级", await waitFor(textIncludes("模型已保存")));
+
   await evaluate(`document.querySelector('button[aria-label="关闭设置"]').click()`);
   await sleep(600);
+  const reasoningPicker = await evaluate(`(() => {
+    const select = document.querySelector('select[title="推理等级"]');
+    return select
+      ? { value: select.value, options: [...select.options].map((item) => item.textContent) }
+      : null;
+  })()`);
+  check("composer 出现推理等级选择", Boolean(reasoningPicker), JSON.stringify(reasoningPicker));
+  check(
+    "推理等级选项来自账户模型",
+    reasoningPicker?.options?.includes("高"),
+    JSON.stringify(reasoningPicker),
+  );
   const afterModel = await evaluate(`(() => {
     const button = [...document.querySelectorAll('button')].find((item) => item.innerText.includes('E2E UI 模型'));
     return button?.innerText.trim() ?? null;

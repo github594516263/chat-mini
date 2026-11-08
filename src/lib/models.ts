@@ -18,6 +18,13 @@
 
 export type ModelCapability = "reasoning" | "vision" | "tools";
 
+/** 一个推理档位：id 是稳定标识，label 给界面看，value 是真正发给上游的参数值 */
+export type ReasoningLevel = {
+  id: string;
+  label: string;
+  value: string;
+};
+
 export type ModelStatus = "live" | "mock" | "off";
 
 export type ProviderConfig = {
@@ -58,6 +65,9 @@ export type PublicModel = {
   tag?: string;
   description?: string;
   capabilities?: ModelCapability[];
+  /** 账户自建模型可选的推理档位；系统目录没有 */
+  reasoningLevels?: ReasoningLevel[];
+  defaultReasoning?: string | null;
   status: ModelStatus;
   /** 来自系统目录（环境变量），不是用户自己配的 */
   system?: boolean;
@@ -90,7 +100,28 @@ export type ResolvedModel = {
   /** 已经补全到 /chat/completions 的完整地址 */
   endpoint: string | null;
   maxOutputTokens?: number | null;
+  reasoningLevels?: ReasoningLevel[];
+  defaultReasoning?: string | null;
 };
+
+export type ReasoningResolution =
+  | { ok: true; value: string | null }
+  | { ok: false; error: string };
+
+/** 把界面选的档位 id 翻成上游参数值；没配档位的模型不发这个参数 */
+export function resolveReasoningValue(
+  model: ResolvedModel,
+  requested?: string | null,
+): ReasoningResolution {
+  const levels = model.reasoningLevels ?? [];
+  if (levels.length === 0) return { ok: true, value: null };
+
+  const id = requested?.trim() || model.defaultReasoning || levels[0]?.id || null;
+  if (!id) return { ok: true, value: null };
+  const level = levels.find((item) => item.id === id);
+  if (!level) return { ok: false, error: "这个推理等级不存在" };
+  return { ok: true, value: level.value };
+}
 
 /**
  * 这里的顺序就是弹层里的分组顺序。

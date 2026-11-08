@@ -50,6 +50,7 @@ export function ChatShell({
     user,
     initialSessionId: urlSessionId,
     modelId: models.selectedId,
+    reasoningId: models.reasoning,
   });
 
   const { syncFromUrl, selectSession: select, newSession: create, deleteSession: remove } = chat;

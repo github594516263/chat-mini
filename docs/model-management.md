@@ -26,7 +26,7 @@
 | 零配置行为 | 空状态 + 显式「没有可用自定义模型时，使用系统默认模型」开关 |
 | 系统默认来源 | 服务器环境变量里的 `DEEPSEEK_*` / 其他 `*_API_KEY` 目录 |
 | 自建 provider 的地址 | 默认拒绝 localhost / 内网 / 链路本地地址（防 SSRF） |
-| 第一版范围 | provider / model CRUD + 测试连接 / 发现；推理档位、图片输入、OAuth 放 P4b |
+| 第一版范围 | provider / model CRUD + 测试连接 / 发现 + 推理等级；图片输入、OAuth 放 P4c |
 
 ---
 
@@ -52,7 +52,7 @@
 │  │     ├─ 上下文窗口
 │  │     ├─ 最大输出 token
 │  │     ├─ 输入类型
-│  │     └─ 推理等级（P4）
+│  │     └─ 推理等级
 │  └─ 添加模型提供商
 ├─ 记忆与进化
 └─ 关于
@@ -108,7 +108,7 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 - `name`：用户可见名称，`(user_id, name)` 唯一；
 - `protocol`：第一版只有 `openai-chat`；
 - `base_url`：服务端 fetch 的地址，写入前做 URL 与 SSRF 校验；
-- `auth_type`：`api_key` / `none`（`oauth` 预留给 P4）；
+- `auth_type`：`api_key` / `none`（`oauth` 预留给 P4c）；
 - `enabled`、`sort_order`、`revision`；
 - `revision` 用于乐观并发：设置页保存时带上读到的版本，旧版本返回 409。
 
@@ -128,8 +128,10 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 - `provider_id` + `model_key` 唯一；
 - `model_key` 是真正发给上游的模型名，`display_name` 只影响界面；
 - `context_window`、`max_output_tokens` 可空；
-- `input_modalities` 默认 `["text"]`，P4 再支持 image；
-- `reasoning_levels`、`default_reasoning` 预留 P4；
+- `input_modalities` 默认 `["text"]`，P4c 再支持 image；
+- `reasoning_levels` 是 JSON 数组，每项 `{ id, label, value }`：`id` 给界面和请求用，`value` 是发给上游的 `reasoning_effort`；
+- `default_reasoning` 存默认档位的 `id`；为空时用第一个档位；
+- 没配 `reasoning_levels` 的模型不会发送推理参数；
 - `enabled` 控制是否出现在 composer；
 - `source`：`manual` / `discovered` / `seed`。
 
@@ -170,9 +172,10 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 
 - 有 `requestedId`：先按 `(model.id, user_id)` 查自定义模型；查不到且用户确实没有可用自定义模型、并显式开了系统兜底，才查系统目录；
 - 没有 `requestedId`：用目录的 `defaultId`，再按 `origin` 决定走自定义还是系统；
-- 返回的 `ResolvedModel` 只包含服务端路由需要的字段：上游模型名、base URL、解密后的 key、max tokens。
+- 返回的 `ResolvedModel` 只包含服务端路由需要的字段：上游模型名、base URL、解密后的 key、max tokens、推理档位。
 
-客户端永远只传 `model`（模型行 UUID 或系统目录 id），**不传 baseURL / upstream / key**。
+客户端永远只传 `model`（模型行 UUID 或系统目录 id）和可选的 `reasoning`（档位 id），**不传 baseURL / upstream / key**。
+服务端用 `resolveReasoningValue` 把档位 id 翻成上游参数值；请求里没带就用模型默认档位，模型没配档位则不发这个参数。
 
 ### 5.3 游客
 
@@ -186,14 +189,16 @@ DSH 的模型设置是「provider 列表 → 展开卡片 → 模型目录」的
 1. 重新校验数据库里的 `base_url`，解密凭据；
 2. 把 base URL 补成 `/models`（已经以 `/models` 或 `/chat/completions` 结尾时不重复拼）；
 3. 用 `Authorization: Bearer <key>` 请求，禁止跟随跳转，12 秒超时，响应上限 2MB；
-4. 兼容 `{ data: [...] }` 和裸数组，提取 `id`、`name`、`context_window`、`max_output_tokens`、`input_modalities`；
+4. 兼容 `{ data: [...] }` 和裸数组，提取 `id`、`name`、`context_window`、`max_output_tokens`、`input_modalities`、`effort.supported_levels` / `effort.default_level`；
 5. 只把模型列表和延迟返回给前端，不返回密钥。
+
+DeepSeek 的 `/models` 会给推理模型返回 `effort.supported_levels` 和 `effort.default_level`，发现结果会转成 `reasoningLevels` / `defaultReasoning`，导入时一起写入。
 
 新建表单里的「测试连接」走 `POST /api/models/providers/test`，复用同一段 fetch 逻辑，但不落库、不保存密钥。
 
 `POST /api/models/providers/[id]/models/import`：
 
-- 接受 `models: [{ modelKey, displayName?, contextWindow?, maxOutputTokens?, inputModalities? }]`；
+- 接受 `models: [{ modelKey, displayName?, contextWindow?, maxOutputTokens?, inputModalities?, reasoningLevels?, defaultReasoning? }]`；
 - 已存在的 `model_key` 跳过，不覆盖用户改过的显示名/参数；
 - 新模型写 `source='discovered'`，并在用户还没有默认模型时设为默认；
 - 单次最多 200 个，事务内插入。
@@ -264,7 +269,7 @@ ALLOW_PRIVATE_MODEL_ENDPOINTS=true
 - 所有查询都带 `user_id`；
 - 跨用户 PATCH/DELETE 返回 404；
 - `model_credentials` 同时带 `provider_id` 和 `user_id`，双保险；
-- 测试脚本覆盖 demo2 看不到、改不了、删不了 demo 的配置。
+- 测试脚本覆盖另一个账号看不到、改不了、删不了当前账号的配置。
 
 ---
 
@@ -279,7 +284,7 @@ ALLOW_PRIVATE_MODEL_ENDPOINTS=true
 - provider 行：状态点、名称、状态文案、模型数量、编辑、删除；
 - 展开卡片：显示名称、API 地址、协议、密钥、无需密钥、启用、保存/取消；
 - 「测试连接」：新建表单里可以先测；已有 provider 卡片里也能测。请求上游 `/models`，显示延迟和发现的模型，可勾选后一键导入；
-- 模型目录：逐行编辑模型 ID、显示名、上下文窗口、最大输出、是否显示；添加/删除；
+- 模型目录：逐行编辑模型 ID、显示名、上下文窗口、最大输出、是否显示；推理等级可添加/删除，最多 8 档，每档填名称和上游参数值，并指定默认档位；
 - 空状态：还没有 provider；
 - 游客：显示登录引导，不发请求。
 
@@ -297,6 +302,7 @@ ALLOW_PRIVATE_MODEL_ENDPOINTS=true
 
 - 目录为空时，触发器显示「配置模型」，点击直接打开设置 → 模型；
 - 有模型时保持原来的搜索、分组、键盘操作、localStorage 持久化；
+- 选中模型配置了推理等级时，模型按钮左侧出现档位选择；选择按模型分别记在 localStorage，模型没配等级时不渲染；
 - 发送按钮在 `selectedId` 为空时禁用，并给出「还没有可用模型」提示。
 
 删除当前选中的模型后，`useModelSelection` 会自动落到目录默认项或空状态。
@@ -312,12 +318,12 @@ ALLOW_PRIVATE_MODEL_ENDPOINTS=true
 | P2 | 设置页 CRUD、空状态、系统默认开关 | 已完成 |
 | P3 | 安全加固（密钥只写、越权、SSRF、乐观并发） | 已完成 |
 | P4a | 测试连接、`/models` 发现、批量导入 | 已完成 |
-| P4b | 推理档位、图片输入、OAuth | 暂缓 |
+| P4b | 推理档位 | 已完成 |
+| P4c | 图片输入、OAuth | 暂缓 |
 
-P4b 未做的显式标记：
+P4c 未做的显式标记：
 
 - API 协议下拉只有 `OpenAI Chat Completions`；
-- 模型行没有「推理等级」；
 - 没有图片输入开关；
 - 没有 OAuth 登录型 provider。
 
@@ -333,17 +339,17 @@ P4b 未做的显式标记：
 pnpm typecheck
 pnpm build
 
-node scripts/e2e-model-config.mjs   # 47 项：隔离 / 加密 / SSRF / 并发 / 系统回退
-node scripts/e2e-models-ui.mjs      # 22 项：设置页 CRUD / 空状态 / composer / 回退开关
+node scripts/e2e-model-config.mjs   # 58 项：隔离 / 加密 / SSRF / 并发 / 推理等级 / 系统回退
+node scripts/e2e-models-ui.mjs      # 25 项：设置页 CRUD / 推理等级 / composer / 回退开关
 node scripts/e2e-model-picker.mjs   # 25 项：游客模型切换回归
-node scripts/e2e-model-discovery.mjs # 21 项：真实 /models 发现 / 元数据 / 批量导入
+node scripts/e2e-model-discovery.mjs # 26 项：真实 /models 发现 / 元数据 / 批量导入
 node scripts/e2e-discovery-ui.mjs   # 10 项：设置页测试连接 / 一键导入
 ```
 
 发现相关断言：
 
 - `/models` 请求不跟随跳转，12 秒超时，响应上限 2MB；
-- 发现结果只回模型 ID、显示名、上下文窗口、最大输出、输入类型，不回密钥；
+- 发现结果只回模型 ID、显示名、上下文窗口、最大输出、输入类型、推理等级，不回密钥；
 - 导入时已存在的模型跳过，不覆盖用户改过的显示名和参数；
 - 发现失败会显示可行动的错误（密钥无效 / 没有 `/models` / 连不上），不会把 provider 标记成可用。
 
@@ -393,4 +399,5 @@ node scripts/e2e-discovery-ui.mjs   # 10 项：设置页测试连接 / 一键导
 - 系统默认目录的模型 id 与账户模型 id 是两套命名空间；目录切换时 localStorage 里的旧 id 会被自动丢弃。
 - 密钥轮换只预留了 `key_version`，还没有管理界面。
 - `/models` 发现已经禁用跳转，但 DNS rebinding 的完整防护（解析后校验 + 固定 IP）仍未实现。
-- 推理等级、图片输入、OAuth 尚未实现；发现结果里的 `input_modalities` 只做存储，composer 还不支持发图。
+- 推理等级按 OpenAI Chat Completions 的 `reasoning_effort` 发送；如果某家上游用别的字段，需要在 provider 协议适配层再加映射。
+- 图片输入、OAuth 尚未实现；发现结果里的 `input_modalities` 只做存储，composer 还不支持发图。

@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { startGeneration, type GenerationOp } from "@/lib/chat-service";
 import { isSameOrigin } from "@/lib/http";
-import { resolveModel } from "@/lib/models";
+import { resolveModel, resolveReasoningValue } from "@/lib/models";
 import { sanitizeMessages, type ChatEvent, type WireMessage } from "@/lib/protocol";
 import { providerForModel } from "@/lib/providers";
 import type { ChatProvider } from "@/lib/providers/base";
@@ -37,6 +37,7 @@ export async function POST(request: NextRequest) {
     messageId?: unknown;
     messages?: unknown;
     model?: unknown;
+    reasoning?: unknown;
   };
   const user = await getCurrentUser();
 
@@ -45,6 +46,11 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "model 必须是字符串 id" }, { status: 400 });
   }
   const requestedModel = typeof body.model === "string" ? body.model.trim() || null : null;
+
+  if (body.reasoning !== undefined && body.reasoning !== null && typeof body.reasoning !== "string") {
+    return Response.json({ error: "reasoning 必须是字符串 id" }, { status: 400 });
+  }
+  const requestedReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : null;
 
   // ---------- 登录用户：服务端持久化路径 ----------
   if (user && typeof body.sessionId === "string" && body.sessionId) {
@@ -76,7 +82,7 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: `unknown kind: ${kind}` }, { status: 400 });
     }
 
-    const result = await startGeneration(user.id, sessionId, op, requestedModel);
+    const result = await startGeneration(user.id, sessionId, op, requestedModel, requestedReasoning);
     if (!result.ok) {
       return Response.json(
         { error: result.message, ...(result.hint ? { hint: result.hint } : {}) },
@@ -119,9 +125,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const reasoning = resolveReasoningValue(model, requestedReasoning);
+  if (!reasoning.ok) {
+    return Response.json({ error: reasoning.error }, { status: 400 });
+  }
+
   const run = createRun();
   // 故意不 await：生成跑在后台，POST 只负责把 runId 交出去
-  void driveEphemeral(providerForModel(model), run, messages);
+  void driveEphemeral(providerForModel(model, reasoning.value), run, messages);
 
   return Response.json({
     runId: run.id,

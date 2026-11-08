@@ -24,12 +24,14 @@ export type OpenAICompatibleOptions = {
   model: string;
   /** 单次输出上限；null/undefined 时不发 max_tokens */
   maxTokens?: number | null;
+  /** 推理档位的上游参数值；null/undefined 时不发 reasoning_effort */
+  reasoningEffort?: string | null;
   /** 出错时告诉用户是哪一家，而不是笼统的 "请求失败" */
   label: string;
 };
 
 export function openAICompatibleProvider(options: OpenAICompatibleOptions): ChatProvider {
-  const { apiKey, endpoint, model, maxTokens, label } = options;
+  const { apiKey, endpoint, model, maxTokens, reasoningEffort, label } = options;
 
   return async function* ({ messages, signal }) {
     let response: Response;
@@ -45,6 +47,7 @@ export function openAICompatibleProvider(options: OpenAICompatibleOptions): Chat
           stream: true,
           stream_options: { include_usage: true },
           ...(maxTokens ? { max_tokens: maxTokens } : {}),
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         }),
         signal,
       });

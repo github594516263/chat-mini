@@ -12,7 +12,7 @@ import { openAICompatibleProvider } from "@/lib/providers/openai-compatible";
  *   off  → 这家没配但别家配了。调用方应该在进入这里之前就拒绝（400）；
  *          这里直接抛错，绝不静默退回假流 —— 那会让用户以为自己在用真模型。
  */
-export function providerForModel(model: ResolvedModel): ChatProvider {
+export function providerForModel(model: ResolvedModel, reasoningEffort?: string | null): ChatProvider {
   if (model.status === "mock") return fakeProvider;
   if (model.status === "live" && model.endpoint) {
     return openAICompatibleProvider({
@@ -20,6 +20,7 @@ export function providerForModel(model: ResolvedModel): ChatProvider {
       endpoint: model.endpoint,
       model: model.definition.upstream,
       maxTokens: model.maxOutputTokens ?? null,
+      reasoningEffort: reasoningEffort ?? null,
       label: model.provider.label,
     });
   }

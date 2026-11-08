@@ -7,9 +7,12 @@ import type { ReactNode } from "react";
 import { AppShell } from "@/components/app-shell";
 import { ChatContext } from "@/components/chat-context";
 import { ChatView } from "@/components/chat-view";
+import { ModelContext } from "@/components/model-context";
 import type { AccountUser } from "@/lib/account";
+import type { ModelCatalog } from "@/lib/models";
 import { readSessionIdFromPath, sessionPath } from "@/lib/session-route";
 import { useChat } from "@/lib/use-chat";
+import { useModelSelection } from "@/lib/use-models";
 
 /**
  * 会话状态的宿主，挂在 (chat) layout 上 —— 比页面活得久。
@@ -29,17 +32,25 @@ import { useChat } from "@/lib/use-chat";
 export function ChatShell({
   live,
   user,
+  catalog,
   children,
 }: {
   live: boolean;
   user: AccountUser | null;
+  catalog: ModelCatalog;
   children: ReactNode;
 }) {
   const pathname = usePathname();
   const router = useRouter();
 
   const urlSessionId = readSessionIdFromPath(pathname);
-  const chat = useChat({ user, initialSessionId: urlSessionId });
+  // 模型选择先于 useChat：请求发出时要拿到最新值。按账号分 key，游客用 guest。
+  const models = useModelSelection(catalog, user?.id ?? "guest");
+  const chat = useChat({
+    user,
+    initialSessionId: urlSessionId,
+    modelId: models.selectedId,
+  });
 
   const { syncFromUrl, selectSession: select, newSession: create, deleteSession: remove } = chat;
 
@@ -99,22 +110,24 @@ export function ChatShell({
   );
 
   return (
-    <ChatContext.Provider value={chat}>
-      <AppShell
-        user={user}
-        live={live}
-        storage={user ? "server" : "local"}
-        sessions={chat.sessions}
-        activeId={chat.activeId}
-        onSelect={selectSession}
-        onNew={newSession}
-        onDelete={deleteSession}
-        onRename={chat.renameSession}
-      >
-        {sessionMissing ? <SessionNotFound onBack={() => router.replace("/")} /> : <ChatView />}
-        {children}
-      </AppShell>
-    </ChatContext.Provider>
+    <ModelContext.Provider value={models}>
+      <ChatContext.Provider value={chat}>
+        <AppShell
+          user={user}
+          live={live}
+          storage={user ? "server" : "local"}
+          sessions={chat.sessions}
+          activeId={chat.activeId}
+          onSelect={selectSession}
+          onNew={newSession}
+          onDelete={deleteSession}
+          onRename={chat.renameSession}
+        >
+          {sessionMissing ? <SessionNotFound onBack={() => router.replace("/")} /> : <ChatView />}
+          {children}
+        </AppShell>
+      </ChatContext.Provider>
+    </ModelContext.Provider>
   );
 }
 

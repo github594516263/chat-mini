@@ -56,6 +56,7 @@
 | D2 | 登录名用**用户名**，不用邮箱 | 邮箱 + 验证邮件 | 邮箱会引入 SMTP、验证链接、找回密码一整套 |
 | D3 | **游客模式 B**：未登录也能聊，但数据只在浏览器；登录后看的是自己账号的数据 | A 强制登录 / B+合并本地会话 | 首次进来就能用；明确**不做**本地数据迁移合并，省掉一堆冲突处理 |
 | D4 | 数据库用 **MySQL**（放弃 SQLite / Postgres） | SQLite 单文件 | 本机已有 MySQL 9.4；顺便作为学习目标。代价是要多一个常驻服务，见 §11 |
+| D5 | 模型目录写在 `src/lib/models.ts`，客户端只传公开 id | 数据库动态目录 / 前端写死模型名 | 现在 4 家 7 条，代码即配置；upstream、base URL、key 全在服务端。详见 [docs/model-switcher.md](docs/model-switcher.md) |
 
 ---
 
@@ -73,7 +74,9 @@
 └─────────────────┘            └──────────┬───────────┘           └──────────────┘
                                           │ SSE (stream:true)
                                           ▼
-                                 api.deepseek.com/chat/completions
+                                 OpenAI 兼容网关 /chat/completions
+                                 （DeepSeek / 星链 / DevPoolAi / 肥猫005，
+                                   由 models.ts 决定这次打哪家）
 ```
 
 三层职责：

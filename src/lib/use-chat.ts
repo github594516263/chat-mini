@@ -114,6 +114,11 @@ export function useChat(
     user?: ChatUser | null;
     /** URL 里的会话 id（/c/[id]）；它比 localStorage 的"上次看的"优先级更高 */
     initialSessionId?: string | null;
+    /**
+     * 当前选中的模型（公开 id）。只影响「下一次请求」，不影响正在跑的 run：
+     * 生成到一半切模型，这条回答仍然用发起时的模型跑完，符合直觉。
+     */
+    modelId?: string | null;
   } = {},
 ) {
   const userId = options.user?.id ?? null;
@@ -160,10 +165,19 @@ export function useChat(
    */
   const scrollMemoryRef = useRef<Map<string, number>>(new Map());
   const resumedRef = useRef<Set<string>>(new Set());
+  /**
+   * 模型选择在组件外（ChatShell）保存，请求发出时通过 ref 取最新值。
+   * 不用 state 依赖：否则每换一次模型，所有 send/regenerate 回调都要重建。
+   */
+  const modelRef = useRef<string | null>(options.modelId ?? null);
   const stateRef = useRef<{ sessions: ChatSession[]; activeId: string | null }>({
     sessions: [],
     activeId: null,
   });
+
+  useEffect(() => {
+    modelRef.current = options.modelId ?? null;
+  }, [options.modelId]);
 
   useEffect(() => {
     stateRef.current = { sessions, activeId };
@@ -545,7 +559,10 @@ export function useChat(
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: payload }),
+          body: JSON.stringify({
+            messages: payload,
+            ...(modelRef.current ? { model: modelRef.current } : {}),
+          }),
           signal: controller.signal,
         });
 
@@ -605,7 +622,11 @@ export function useChat(
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, ...body }),
+          body: JSON.stringify({
+            sessionId,
+            ...body,
+            ...(modelRef.current ? { model: modelRef.current } : {}),
+          }),
         });
         const data = (await readJsonResponse(response)) as {
           runId?: string;

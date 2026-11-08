@@ -17,6 +17,7 @@ import { initialsOf } from "@/lib/account";
 import { logoutRequest } from "@/lib/client-auth";
 import type { ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { useModelContext } from "@/components/model-context";
 
 /**
  * 设置面板（框架版）。
@@ -380,6 +381,8 @@ function MemoryPane() {
 }
 
 function AboutPane({ live, storage }: { live: boolean; storage: "local" | "server" }) {
+  const model = useModelContext();
+
   return (
     <div className="space-y-5">
       <Panel title="版本">
@@ -389,8 +392,10 @@ function AboutPane({ live, storage }: { live: boolean; storage: "local" | "serve
         <Field label="运行时" hint="Next 16 · React 19 · Tailwind v4">
           <span className="text-[12px] text-muted-foreground">Turbopack</span>
         </Field>
-        <Field label="模型" hint="可用 DEEPSEEK_MODEL 切换">
-          <span className="text-[12px] text-muted-foreground">deepseek-chat</span>
+        <Field label="模型" hint="在输入框下方随时切换">
+          <span className="text-[12px] text-muted-foreground">
+            {model.selected?.label ?? "—"}
+          </span>
         </Field>
         <Field label="数据源" hint={live ? "已配置 API Key，走真实模型" : "未配置 Key，走假数据流"}>
           <span

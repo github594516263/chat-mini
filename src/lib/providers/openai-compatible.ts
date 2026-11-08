@@ -1,21 +1,14 @@
 import type { ChatProvider } from "@/lib/providers/base";
 
 /**
- * 兼容官方与各种 OpenAI 兼容中转站：
- *   DEEPSEEK_BASE_URL 不填 → https://api.deepseek.com
- *   填 https://xxx.com          → https://xxx.com/chat/completions
- *   填 https://xxx.com/v1       → https://xxx.com/v1/chat/completions
- *   填 .../chat/completions     → 原样使用
+ * 所有 OpenAI 兼容网关共用这一份实现：DeepSeek 官方、星链、DevPoolAi、肥猫005
+ * 都是 POST /chat/completions + SSE，区别只有地址、key 和模型名。
+ *
+ * 把「协议翻译」收在一个文件里，新增一家 provider 只需要在 models.ts 里加三行配置，
+ * 不用复制一遍 SSE 解析。
  */
-function resolveEndpoint(): string {
-  const raw = process.env.DEEPSEEK_BASE_URL?.trim();
-  if (!raw) return "https://api.deepseek.com/chat/completions";
-  const base = raw.replace(/\/+$/, "");
-  if (base.endsWith("/chat/completions")) return base;
-  return `${base}/chat/completions`;
-}
 
-type DeepSeekChunk = {
+type CompatibleChunk = {
   choices?: {
     delta?: { content?: string | null; reasoning_content?: string | null };
     finish_reason?: string | null;
@@ -23,16 +16,17 @@ type DeepSeekChunk = {
   usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
 };
 
-/**
- * 真数据流：DeepSeek 的 OpenAI 兼容接口，把它的 SSE 增量翻译成我们自己的事件。
- * 这就是「替身 vs 原配」的分界线——协议是我们的，模型是别人的。
- */
-export function deepseekProvider(options: {
+export type OpenAICompatibleOptions = {
   apiKey: string;
-  model?: string;
-}): ChatProvider {
-  const model = options.model ?? process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
-  const endpoint = resolveEndpoint();
+  /** 完整地址，已经补到 /chat/completions */
+  endpoint: string;
+  model: string;
+  /** 出错时告诉用户是哪一家，而不是笼统的 "请求失败" */
+  label: string;
+};
+
+export function openAICompatibleProvider(options: OpenAICompatibleOptions): ChatProvider {
+  const { apiKey, endpoint, model, label } = options;
 
   return async function* ({ messages, signal }) {
     let response: Response;
@@ -41,7 +35,7 @@ export function deepseekProvider(options: {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${options.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
           model,
@@ -52,7 +46,12 @@ export function deepseekProvider(options: {
         signal,
       });
     } catch (error) {
-      yield { type: "error", message: `连接 DeepSeek 失败：${(error as Error).message}` };
+      // 用户点「停止」也会让 fetch reject；这不是错误，按 aborted 正常收尾
+      if (signal.aborted) {
+        yield { type: "completed", finish_reason: "aborted" };
+        return;
+      }
+      yield { type: "error", message: `连接 ${label} 失败：${(error as Error).message}` };
       return;
     }
 
@@ -60,7 +59,7 @@ export function deepseekProvider(options: {
       const detail = await response.text().catch(() => "");
       const hint =
         response.status === 401 || response.status === 403
-          ? "（key 无效或不属于该服务商；如果你用的是中转站，需要同时设置 DEEPSEEK_BASE_URL）"
+          ? `（${label} 的 key 无效或无权访问该模型；中转站还要确认 base URL 配对）`
           : "";
       yield {
         type: "error",
@@ -91,9 +90,9 @@ export function deepseekProvider(options: {
           const payload = line.slice(5).trim();
           if (!payload || payload === "[DONE]") continue;
 
-          let chunk: DeepSeekChunk;
+          let chunk: CompatibleChunk;
           try {
-            chunk = JSON.parse(payload) as DeepSeekChunk;
+            chunk = JSON.parse(payload) as CompatibleChunk;
           } catch {
             continue;
           }
@@ -121,7 +120,7 @@ export function deepseekProvider(options: {
       }
     } catch (error) {
       if (!signal.aborted) {
-        yield { type: "error", message: `读取流失败：${(error as Error).message}` };
+        yield { type: "error", message: `读取 ${label} 的流失败：${(error as Error).message}` };
         return;
       }
     }

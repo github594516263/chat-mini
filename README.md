@@ -5,14 +5,9 @@
 
 > 正在把状态层从浏览器搬到 MySQL + 加登录。设计、决策记录、各阶段验收标准见 **[DESIGN.md](DESIGN.md)**。
 
-核心链路 6 个文件、约 500 行（含注释，`cloc` 口径下更少）：
-
-| 部分 | 行数 |
-| --- | --- |
-| `api/chat/route.ts` + `protocol.ts` + `providers/*` | 265 |
-| `use-chat-stream.ts`（前端状态机） | 153 |
-| `components/chat.tsx`（界面） | 233 |
-| `globals.css`（设计令牌） | 129 |
+核心链路都在仓库里，没有 zustand / tanstack-query / AI SDK：
+`api/chat/route.ts` 建 run，`providers/*` 把上游 SSE 翻译成自有事件，`use-chat.ts` 管前端状态，
+`chat-view.tsx` 渲染。完整分工见下方「文件地图」。
 
 ## 跑起来
 
@@ -30,10 +25,18 @@ pnpm dev          # http://localhost:3000
 cp .env.example .env.local
 # 官方：DEEPSEEK_API_KEY=sk-xxx
 # 中转站/自建网关：再加一行 DEEPSEEK_BASE_URL=https://xxx.com（或 https://xxx.com/v1）
+# 想同时挂多家：在 models.ts 里加目录项，再填对应的 *_API_KEY / *_BASE_URL
 ```
 
-页面右上角的 `mock` / `live` 徽标会告诉你当前走的是哪条路。
-key 无效时不会静默失败，错误会以一条 `error` 事件推到界面上（并提示去检查 `DEEPSEEK_BASE_URL`）。
+侧栏顶部（移动端在标题栏右侧）的 `mock` / `live` 徽标会告诉你当前走的是哪条路。
+输入框右侧的模型菜单可以搜索、分组切换；**只配了一部分 provider 时，没配的那几家会标「未配置」且不可选**，
+不会出现「界面显示 live、实际偷偷走假流」。
+key 无效时不会静默失败，错误会以一条 `error` 事件推到界面上（并提示去检查 base URL）。
+
+模型切换器的完整设计（截图拆解、其他项目的做法、状态放哪、怎么加 provider）见
+**[docs/model-switcher.md](docs/model-switcher.md)**。
+
+![模型切换器](docs/model-picker.png)
 
 ## 登录与账号（MySQL）
 
@@ -61,6 +64,7 @@ node scripts/e2e-auth.mjs                 # 16 项认证检查（登录/登出/�
 node scripts/e2e-sessions-api.mjs         # 23 项会话接口检查（隔离/分页/搜索/软删）
 node scripts/e2e-chat-server.mjs          # 21 项服务端生成检查（落库/取消/重启降级）
 node scripts/e2e-logged-in.mjs            # 19 项浏览器实测（需先起无头 Chrome，见脚本头）
+node scripts/e2e-model-picker.mjs         # 25 项模型切换检查（搜索/键盘/持久化/请求体）
 ```
 
 生成的两条路径（同一个 `POST /api/chat`）：
@@ -112,13 +116,14 @@ GET    /api/sessions/search?q=             标题 LIKE + 正文 ngram 全文索�
 ## 现在已经能做的
 
 - 流式对话（真模型 / 假数据流一键切换）
+- **模型切换器**：输入框右侧按 provider 分组、可搜索、键盘可选；只下发公开 id，服务端查表路由
 - **登录 / 游客双模式**：登录后对话存 MySQL、多设备可见；不登录也能用（数据只在本地浏览器）
 - 停止生成（AbortController 一路断到 provider）
 - **多会话**：侧栏列表、切换、删除、标题自动取首条消息；`localStorage` 持久化，刷新不丢
 - **断线续传**：生成跑在服务端，刷新/断网/切标签页回来能接着续（按 `seq` 水位补发，不重头不重复）
 - **会话管理**：搜索（按标题，实时过滤）、重命名（双击标题或点铅笔，Enter 保存 / Esc 取消，改名不改变排序）
 - **消息动作**：复制、重新生成、编辑重发（改掉用户消息后从那里重新流，之后的回答会被丢弃）
-- 思维链单独折叠（配 `DEEPSEEK_MODEL=deepseek-reasoner` 就能看到真的）
+- 思维链单独折叠（选 `DeepSeek-V4-Pro`，或配 `DEEPSEEK_MODEL=deepseek-reasoner`）
 - Markdown 全支持：表格 / 代码高亮 / 引用 / 列表，代码块自带复制下载
 - **主题三态**：浅色 / 深色 / 跟随系统，记住了刷新不跳；首屏由内联脚本先定 class，不会闪白
 - token 用量显示（真实 usage，不是估算）
@@ -164,15 +169,20 @@ GET    /api/sessions/search?q=             标题 LIKE + 正文 ngram 全文索�
 | `src/lib/startup.ts` | 启动清理：残留的 `running` 标成 interrupted、过期登录会话清掉 |
 | `src/instrumentation.ts` | Next 启动钩子，把上面的清理挂到进程启动 |
 | `src/lib/protocol.ts` | 事件类型 + 编解码 + 上行报文清洗 |
+| `src/lib/models.ts` | 模型目录：provider / upstream / 倍率 / 三态（live·mock·off）、公开 DTO、服务端解析 |
 | `src/lib/providers/fake.ts` | 假数据流（带 think_delta、表格、代码块） |
-| `src/lib/providers/deepseek.ts` | 真数据流：把 DeepSeek 的 SSE 翻译成我们自己的事件（支持 `DEEPSEEK_BASE_URL`） |
+| `src/lib/providers/openai-compatible.ts` | OpenAI 兼容网关的 SSE → 自有事件翻译（四家 provider 共用一份） |
+| `src/lib/providers/index.ts` | `providerForModel()`：live 走真流、mock 走假流、off 直接抛错（不静默降级） |
+| `src/lib/use-models.ts` | 前端选择状态：读目录、校验、按账号写 localStorage |
+| `src/components/model-context.tsx` | 模型选择的 Context（Picker 和设置页共用一个真相） |
+| `src/components/model-picker.tsx` | 模型弹层：搜索、分组、徽标、选中态、键盘 / 移动端 |
 | `src/lib/sessions.ts` | 会话存储层：读写 localStorage、标题派生、旧版数据迁移、`pending` 状态归一 |
-| `src/lib/use-chat.ts` | 会话 + 生成的唯一状态源。一个引擎两个后端：游客走 localStorage，登录走服务端 API；`send/regenerate/editAndResend/continueGeneration` 共用一条续传链路 |`startRun` |
+| `src/lib/use-chat.ts` | 会话 + 生成的唯一状态源。一个引擎两个后端：游客走 localStorage，登录走服务端 API；`send/regenerate/editAndResend/continueGeneration` 共用一条续传链路 |
 | `src/components/sidebar.tsx` | 会话列表：新建 / 切换 / 删除 / 搜索 / 重命名 / 自动标题 |
 | `src/lib/theme.ts` | 主题三态：读写偏好、解析 system、首屏内联脚本字符串 |
 | `src/lib/use-theme.ts` | 主题状态 hook：挂载读偏好、监听系统配色、只改 `<html class>` |
 | `src/components/theme-menu.tsx` | 右上角主题菜单（浅色 / 深色 / 跟随系统） |
-| `src/components/chat.tsx` | 界面：空态、消息流、动作条、编辑重发、输入框、移动端抽屉 |
+| `src/components/chat-view.tsx` | 界面：空态、消息流、动作条、编辑重发、输入框、模型选择器、移动端抽屉 |
 | `src/app/globals.css` | 设计令牌（shadcn 语义命名）+ Tailwind v4 配置 |
 | `src/app/preview/page.tsx` | 渲染自检页：固定 markdown，用来看 streamdown 样式对不对 |
 

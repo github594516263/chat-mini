@@ -3,9 +3,9 @@ import type { NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { startGeneration, type GenerationOp } from "@/lib/chat-service";
 import { isSameOrigin } from "@/lib/http";
+import { resolveModel } from "@/lib/models";
 import { sanitizeMessages, type ChatEvent, type WireMessage } from "@/lib/protocol";
-import { deepseekProvider } from "@/lib/providers/deepseek";
-import { fakeProvider } from "@/lib/providers/fake";
+import { providerForModel } from "@/lib/providers";
 import type { ChatProvider } from "@/lib/providers/base";
 import { appendEvent, createRun, finishRun, type Run } from "@/lib/runs";
 
@@ -17,8 +17,10 @@ export const dynamic = "force-dynamic";
  * 真正的读取入口是 GET /api/chat/stream?runId=&afterSeq=
  *
  * 两种调用方式：
- *   登录用户：{ sessionId, content }   —— 服务端取历史、写消息、流式落盘
- *   游客    ：{ messages: [...] }      —— 只生成，不写库（数据在浏览器本地）
+ *   登录用户：{ sessionId, content, model? } —— 服务端取历史、写消息、流式落盘
+ *   游客    ：{ messages: [...], model? }    —— 只生成，不写库（数据在浏览器本地）
+ *
+ * model 只接受公开 id（如 deepseek:v4.1-flash），服务端查目录决定路由。
  */
 export async function POST(request: NextRequest) {
   let raw: unknown;
@@ -34,8 +36,15 @@ export async function POST(request: NextRequest) {
     kind?: unknown;
     messageId?: unknown;
     messages?: unknown;
+    model?: unknown;
   };
   const user = await getCurrentUser();
+
+  // 只收字符串 id；数字 / 对象一律拒绝，避免"类型不对就悄悄用默认值"
+  if (body.model !== undefined && body.model !== null && typeof body.model !== "string") {
+    return Response.json({ error: "model 必须是字符串 id" }, { status: 400 });
+  }
+  const requestedModel = typeof body.model === "string" ? body.model.trim() || null : null;
 
   // ---------- 登录用户：服务端持久化路径 ----------
   if (user && typeof body.sessionId === "string" && body.sessionId) {
@@ -67,7 +76,7 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: `unknown kind: ${kind}` }, { status: 400 });
     }
 
-    const result = await startGeneration(user.id, sessionId, op);
+    const result = await startGeneration(user.id, sessionId, op, requestedModel);
     if (!result.ok) {
       return Response.json(
         { error: result.message, ...(result.hint ? { hint: result.hint } : {}) },
@@ -77,6 +86,7 @@ export async function POST(request: NextRequest) {
 
     return Response.json({
       runId: result.runId,
+      model: result.model,
       afterSeq: 0,
       mode: "server",
       session: result.session,
@@ -94,16 +104,32 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // 游客也要过服务端目录：客户端只传公开 id，不能自己指定 upstream / 地址
+  const model = resolveModel(requestedModel);
+  if (!model) {
+    return Response.json({ error: "未知模型", hint: "模型 id 不在服务端目录里" }, { status: 400 });
+  }
+  if (model.status === "off") {
+    return Response.json(
+      {
+        error: `${model.provider.label} 还没有配置`,
+        hint: `在 .env.local 里补 ${model.provider.keyEnv} 和 ${model.provider.baseUrlEnv}`,
+      },
+      { status: 400 },
+    );
+  }
+
   const run = createRun();
   // 故意不 await：生成跑在后台，POST 只负责把 runId 交出去
-  void driveEphemeral(pickProvider(), run, messages);
+  void driveEphemeral(providerForModel(model), run, messages);
 
-  return Response.json({ runId: run.id, afterSeq: 0, mode: "guest" });
-}
-
-function pickProvider(): ChatProvider {
-  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
-  return apiKey ? deepseekProvider({ apiKey }) : fakeProvider;
+  return Response.json({
+    runId: run.id,
+    model: model.definition.id,
+    mock: model.status === "mock",
+    afterSeq: 0,
+    mode: "guest",
+  });
 }
 
 /** 游客：把 provider 的事件流按 seq 记进 run，并推给所有订阅者（不落库） */
@@ -118,9 +144,24 @@ async function driveEphemeral(
   };
 
   try {
+    let finishReason: "stop" | "length" = "stop";
     for await (const event of provider({ messages, signal: run.abort.signal })) {
+      // 和登录路径同一套规则：error 事件转异常，completed 由这里统一发
+      if (event.type === "error") throw new Error(event.message);
+      if (event.type === "completed") {
+        if (event.finish_reason === "length") finishReason = "length";
+        continue;
+      }
       emit(event);
     }
+
+    if (run.abort.signal.aborted) {
+      emit({ type: "completed", finish_reason: "aborted" });
+      finishRun(run, "aborted");
+      return;
+    }
+
+    emit({ type: "completed", finish_reason: finishReason });
     finishRun(run, "done");
   } catch (error) {
     if (run.abort.signal.aborted) {

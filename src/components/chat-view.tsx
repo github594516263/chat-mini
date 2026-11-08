@@ -8,6 +8,8 @@ import { code } from "@streamdown/code";
 import { useAppShell } from "@/components/app-shell";
 import { ThemeMenu } from "@/components/theme-menu";
 import { useChatContext } from "@/components/chat-context";
+import { useModelContext } from "@/components/model-context";
+import { ModelPicker } from "@/components/model-picker";
 import type { ChatUIMessage } from "@/lib/use-chat";
 import { cn } from "@/lib/utils";
 
@@ -45,6 +47,7 @@ const ACTION_BTN =
 export function ChatView() {
   const { openMobileSidebar, themeMode, setTheme, live } = useAppShell();
   const chat = useChatContext();
+  const model = useModelContext();
 
   const {
     activeId,
@@ -152,9 +155,6 @@ export function ChatView() {
           {activeSession?.title ?? "新对话"}
         </h1>
         <ThemeMenu mode={themeMode} onSelect={setTheme} />
-        <span className="hidden shrink-0 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground sm:inline">
-          deepseek-chat
-        </span>
         <span
           className={cn(
             "shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium md:hidden",
@@ -204,7 +204,7 @@ export function ChatView() {
 
       <div className="shrink-0 border-t border-border bg-background">
         <div className="mx-auto w-full max-w-3xl px-4 py-3">
-          <div className="flex items-end gap-2 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
+          <div className="relative flex flex-wrap items-end gap-x-2 gap-y-1.5 rounded-[26px] border border-border bg-background p-2 pl-4 shadow-sm transition-colors focus-within:border-primary/60">
             <textarea
               ref={textareaRef}
               data-composer="1"
@@ -218,26 +218,34 @@ export function ChatView() {
               }}
               rows={1}
               placeholder="给 chat-mini 发送消息…"
-              className="max-h-[200px] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
+              className="max-h-[200px] min-w-[9rem] flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground"
             />
-            <button
-              type="button"
-              onClick={streaming ? stop : submit}
-              disabled={!streaming && !input.trim()}
-              aria-label={streaming ? "停止生成" : "发送"}
-              className={cn(
-                "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
-                streaming
-                  ? "bg-foreground text-background hover:opacity-90"
-                  : "bg-primary text-primary-foreground hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground",
-              )}
-            >
-              {streaming ? (
-                <Square size={13} fill="currentColor" />
-              ) : (
-                <ArrowUp size={16} strokeWidth={2.4} />
-              )}
-            </button>
+            {/* 窄屏放不下一行时，这组会整体折到第二行，而不是把输入框挤成三行 */}
+            <div className="ml-auto flex items-center gap-1.5">
+              <ModelPicker
+                groups={model.groups}
+                selected={model.selected}
+                onSelect={model.select}
+              />
+              <button
+                type="button"
+                onClick={streaming ? stop : submit}
+                disabled={!streaming && !input.trim()}
+                aria-label={streaming ? "停止生成" : "发送"}
+                className={cn(
+                  "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
+                  streaming
+                    ? "bg-foreground text-background hover:opacity-90"
+                    : "bg-primary text-primary-foreground hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground",
+                )}
+              >
+                {streaming ? (
+                  <Square size={13} fill="currentColor" />
+                ) : (
+                  <ArrowUp size={16} strokeWidth={2.4} />
+                )}
+              </button>
+            </div>
           </div>
           <p className="mt-2 text-center text-[11px] text-muted-foreground">
             内容由 AI 生成，请自行核对

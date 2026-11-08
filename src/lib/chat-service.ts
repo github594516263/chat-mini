@@ -1,7 +1,7 @@
+import { resolveModel } from "@/lib/models";
 import type { ChatEvent, WireMessage } from "@/lib/protocol";
+import { providerForModel } from "@/lib/providers";
 import type { ChatProvider } from "@/lib/providers/base";
-import { deepseekProvider } from "@/lib/providers/deepseek";
-import { fakeProvider } from "@/lib/providers/fake";
 import { appendEvent, createRun, finishRun, type Run } from "@/lib/runs";
 import {
   appendMessage,
@@ -53,6 +53,8 @@ export type StartResult =
   | {
       ok: true;
       runId: string;
+      /** 本次实际使用的公开模型 id（服务端解析后的结果，回给前端对齐 UI） */
+      model: string;
       session: SessionDto;
       userMessage: MessageDto | null;
       assistantMessage: MessageDto;
@@ -69,18 +71,27 @@ type Prepared = {
 /** 准备阶段的结果：null=消息不存在（404），{error}=参数不合法（400），否则正常 */
 type PrepareResult = Prepared | { error: string } | null;
 
-function pickProvider(): ChatProvider {
-  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
-  return apiKey ? deepseekProvider({ apiKey }) : fakeProvider;
-}
-
 export async function startGeneration(
   userId: string,
   sessionId: string,
   op: GenerationOp,
+  modelId?: string | null,
 ): Promise<StartResult> {
   const session = await getSession(userId, sessionId);
   if (!session) return { ok: false, status: 404, message: "会话不存在" };
+
+  const model = resolveModel(modelId);
+  if (!model) {
+    return { ok: false, status: 400, message: "未知模型", hint: "模型 id 不在服务端目录里" };
+  }
+  if (model.status === "off") {
+    return {
+      ok: false,
+      status: 400,
+      message: `${model.provider.label} 还没有配置`,
+      hint: `在 .env.local 里补 ${model.provider.keyEnv} 和 ${model.provider.baseUrlEnv}`,
+    };
+  }
 
   try {
     const prepared = await prepare(userId, sessionId, op);
@@ -103,6 +114,7 @@ export async function startGeneration(
     // 故意不 await：POST 只负责把 runId 交出去
     void driveServerRun({
       run,
+      provider: providerForModel(model),
       userId,
       sessionId,
       messageId: assistantMessage.id,
@@ -113,6 +125,7 @@ export async function startGeneration(
     return {
       ok: true,
       runId: run.id,
+      model: model.definition.id,
       session: (await getSession(userId, sessionId)) ?? session,
       userMessage,
       assistantMessage: { ...assistantMessage, status: "streaming", runId: run.id, baseLen },
@@ -210,13 +223,14 @@ async function prepare(
 
 async function driveServerRun(args: {
   run: Run;
+  provider: ChatProvider;
   userId: string;
   sessionId: string;
   messageId: string;
   baseLen: number;
   history: WireMessage[];
 }): Promise<void> {
-  const { run, userId, sessionId, messageId, baseLen, history } = args;
+  const { run, provider, userId, sessionId, messageId, baseLen, history } = args;
 
   let seq = 0;
   // 续写时库里已有前缀，新的增量接在它后面。
@@ -279,7 +293,17 @@ async function driveServerRun(args: {
   };
 
   try {
-    for await (const event of pickProvider()({ messages: history, signal: run.abort.signal })) {
+    let finishReason: "stop" | "length" = "stop";
+    for await (const event of provider({ messages: history, signal: run.abort.signal })) {
+      // 上游的错误事件要变成异常，交给下面的 catch 统一定稿；
+      // 否则循环正常结束会把一条失败的回答记成 complete。
+      if (event.type === "error") throw new Error(event.message);
+      // completed 由这里统一发，避免同一个 run 出现两条 completed
+      if (event.type === "completed") {
+        if (event.finish_reason === "length") finishReason = "length";
+        continue;
+      }
+
       if (event.type === "delta") content += event.delta;
       else if (event.type === "think_delta") thinking += event.delta;
       else if (event.type === "usage") {
@@ -301,7 +325,7 @@ async function driveServerRun(args: {
       return;
     }
 
-    emit({ type: "completed", finish_reason: "stop" });
+    emit({ type: "completed", finish_reason: finishReason });
     await flush(true);
     await finalize("complete");
     finishRun(run, "done");

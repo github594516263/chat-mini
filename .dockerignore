@@ -1,0 +1,30 @@
+# 构建上下文越小，docker build 越快。这些都是本地产物，镜像里一律不要。
+
+node_modules
+.next
+out
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# 环境变量绝不进镜像
+.env
+.env.local
+.env.production
+.env.*.local
+
+# 本地/调试残留
+.git
+.gitignore
+backups
+shots-framework
+.tmp-*
+.tmp-chrome
+.tmp-perf
+.tmp-dev.log
+*.log
+
+# 文档用不到，但 schema.sql 必须留着（compose 会 bind mount 它）
+docs
+DESIGN.md
+README.md

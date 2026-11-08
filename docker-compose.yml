@@ -1,0 +1,71 @@
+# chat-mini 生产部署：一个 MySQL + 一个应用容器
+#
+# 用法：
+#   cp .env.docker.example .env      # 填好密码和 key
+#   sudo docker compose up -d --build
+#
+# 外部访问统一走宿主机 nginx（127.0.0.1:3001 → chat.hhyapi.top），
+# 所以 app 端口只绑 127.0.0.1，mysql 完全不出网。
+
+name: chat-mini
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: chat-mini-mysql
+    restart: always
+    # 2G 机器必调：默认缓冲池 128M + performance_schema 常驻，一起能吃到 400M+
+    command:
+      - --innodb-buffer-pool-size=256M
+      - --performance-schema=OFF
+      - --max-connections=50
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 只有数据目录为空（首次启动）时才会执行这两个脚本
+      - ./scripts/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./deploy/mysql-init/02-grants.sql:/docker-entrypoint-initdb.d/02-grants.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysql -h127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" -e 'SELECT 1' >/dev/null 2>&1 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # 故意不写 ports：MySQL 只在 compose 内网可达，公网碰不到
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chat-mini
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      MODEL_SECRET_KEY: ${MODEL_SECRET_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-}
+      # 注册接口保持关闭，账号用 scripts/create-user.mjs 手动建
+      ALLOW_REGISTER: "false"
+      ALLOW_PRIVATE_MODEL_ENDPOINTS: "false"
+    ports:
+      # 只绑本机，让 nginx 反代。直接对公网开 3001 会绕开 HTTPS
+      - "127.0.0.1:3001:3001"
+
+volumes:
+  mysql_data:

@@ -21,6 +21,12 @@ const MAX_MEM = 256 * 1024 * 1024;
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function loadEnv() {
+  // Docker 部署：镜像里没有 .env.local，配置由 compose 直接注入成环境变量。
+  // 只要这三个核心项齐了就走环境变量，否则退回读本地文件（dev 用）。
+  if (process.env.DB_HOST && process.env.DB_USER && process.env.DB_NAME) {
+    return process.env;
+  }
+
   const file = join(root, ".env.local");
   const env = {};
   try {

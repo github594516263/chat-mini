@@ -8,3 +8,7 @@ shots-framework
 .tmp-dev.log
 
 .tmp-perf/
+.tmp-clean/
+
+# 本地数据库备份（含用户/会话数据，不提交）
+backups/

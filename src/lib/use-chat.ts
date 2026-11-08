@@ -345,8 +345,18 @@ export function useChat(
 
   // ---------------------------------------------------------------- 滚动位置（按会话）
 
+  /**
+   * 只记"用户自己往上翻"留下的位置；贴着底部时不记。
+   *
+   * 所以"没记忆" = 上次离开时就在底部 = 下次进来直接到底，
+   * 不需要在 ChatView 里再从像素距离反推一次。
+   */
   const rememberScroll = useCallback((sessionId: string, top: number) => {
     scrollMemoryRef.current.set(sessionId, top);
+  }, []);
+
+  const forgetScroll = useCallback((sessionId: string) => {
+    scrollMemoryRef.current.delete(sessionId);
   }, []);
 
   const recallScroll = useCallback((sessionId: string): number | null => {
@@ -1171,6 +1181,7 @@ export function useChat(
     updateEditDraft,
     endEdit,
     rememberScroll,
+    forgetScroll,
     recallScroll,
     hydrated,
     messagesLoading,

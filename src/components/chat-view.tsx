@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Check, Copy, PanelLeft, Pencil, RotateCcw, Square } from "lucide-react";
 import { Streamdown, type StreamdownTranslations } from "streamdown";
 import { code } from "@streamdown/code";
@@ -39,6 +39,25 @@ const SUGGESTIONS = [
 
 const ACTION_BTN =
   "flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
+
+/**
+ * 离底部多近算"还贴着底"。
+ *
+ * 这个值只用来识别**用户的意图**（还要不要跟着新内容走），不参与"内容变长了要不要跟"的
+ * 判断 —— 那个判断交给滚动事件：一次代码块/markdown 重排就能把高度顶上去几百像素，
+ * 用像素距离判断会在那一帧误判成"用户往上翻了"，从此再也不跟随。
+ */
+const BOTTOM_SLACK = 24;
+
+function isNearBottom(el: HTMLElement, slack = BOTTOM_SLACK) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
+}
+
+/**
+ * 落位必须在浏览器绘制前完成，否则会先闪一帧"贴底"再跳到记忆位置。
+ * 服务端没有 layout effect，退回 useEffect（避免 SSR 期的 useLayoutEffect 警告）。
+ */
+const useBeforePaint = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 /**
  * 消息列表上要用的动作，统一收在一个**稳定**对象里。
@@ -80,18 +99,53 @@ export function ChatView() {
     getDraft,
     setDraft,
     rememberScroll,
+    forgetScroll,
     recallScroll,
   } = chat;
 
   const scrollRef = useRef<HTMLElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   /** 输入框的对外把手：Hero 的推荐问句要能把文字塞进去 */
   const composerApi = useRef<ComposerApi | null>(null);
-  /** 刚切到哪条会话：用来区分"切过来"和"同一条会话里长出新内容" */
-  const restoreForRef = useRef<string | null>(null);
+
+  /**
+   * 要不要跟着新内容走。
+   *
+   * 进入会话时打开；用户自己往上翻就关掉（正在读历史的人不能被拽回底部）；
+   * 再翻回底部、或者自己发了一条消息，重新打开。
+   */
+  const stickRef = useRef(true);
+
+  /**
+   * 等着落位的滚动位置。`top === null` 表示这条会话没有记忆，落到最底部。
+   *
+   * 切会话时只**登记**，等正文真正渲染出来才落位：骨架屏的高度不是正文高度，
+   * 在骨架期按 scrollHeight 落位只能落到 0，等消息到了又会被当成"用户不在底部"，
+   * 于是"刚进来"永远停在顶部。
+   */
+  const restoreRef = useRef<{ id: string; top: number | null } | null>(null);
+
+  /** 正文容器的 ResizeObserver：正文一变高就贴底（流式、代码高亮、图片加载都算） */
+  const observerRef = useRef<ResizeObserver | null>(null);
 
   const chatRef = useRef(chat);
   chatRef.current = chat;
+
+  // 滚动监听只挂一次：回调里用 ref 取"当前会话"，免得切换那一瞬间的滚动事件
+  // 还落在旧会话的闭包里，把新会话的位置记到旧会话头上。
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+
+  /**
+   * 该显示骨架吗？
+   *
+   * 判断必须用**同步可得**的 `session.loaded`，不能用 messagesLoading ——
+   * 那个是在 effect 里才置 true 的，于是切到冷会话的第一帧会满足
+   * "messages 为空 + loading 还是 false"，先把 Hero 空态渲染出来，
+   * 下一帧再切成骨架 → 用户看到 Hero 闪一下。
+   * loaded 从列表数据里来，渲染时就有，不存在这个空窗。
+   */
+  const sessionPending = activeSession?.loaded === false;
+  const showSkeleton = !hydrated || sessionPending || (messagesLoading && messages.length === 0);
 
   const actions = useMemo<MessageActions>(
     () => ({
@@ -108,37 +162,71 @@ export function ChatView() {
     [],
   );
 
+  // 切会话 → 登记落位任务（有记忆用记忆，没记忆贴底）
+  useBeforePaint(() => {
+    restoreRef.current = activeId ? { id: activeId, top: recallScroll(activeId) } : null;
+    stickRef.current = true;
+  }, [activeId, recallScroll]);
 
-  // 切会话：标记这次需要恢复位置（位置本身存在 Provider 里）
-  useEffect(() => {
-    restoreForRef.current = activeId;
-  }, [activeId]);
+  // 正文就绪后落位。骨架屏期间不动：骨架的高度没有参考价值。
+  useBeforePaint(() => {
+    const el = scrollRef.current;
+    const pending = restoreRef.current;
+    if (!el || !pending || pending.id !== activeId || showSkeleton) return;
+    restoreRef.current = null;
+    el.scrollTop = pending.top ?? el.scrollHeight;
+    stickRef.current = isNearBottom(el);
+  }, [activeId, showSkeleton]);
 
+  /**
+   * 正文一变高就贴底 —— 流式输出"跟不跟"，靠的就是这一条。
+   *
+   * 不能靠"messages 变了就滚"：气泡里的正文是节流渲染的（见 useThrottledText），
+   * 高度变化和 React 提交不在同一帧；而且代码高亮、图片、表格重排都会让高度
+   * 在之后继续变。盯住容器本身的尺寸最省心。
+   */
+  const attachContent = useCallback((node: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (!node) return;
+    const ro = new ResizeObserver(() => {
+      const el = scrollRef.current;
+      // 还没落位（刚进会话）时别抢：落位由上面那个 effect 负责
+      if (!el || restoreRef.current || !stickRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(node);
+    observerRef.current = ro;
+  }, []);
+
+  // 视口变矮、输入框长高都会改变可视区高度：不重新贴底就会停在"差一点到底"
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || !activeId) return;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (restoreRef.current || !stickRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
-    if (restoreForRef.current !== activeId) {
-      // 同一条会话里内容变长：只在用户本来贴着底部时才跟随，
-      // 否则会把正在往上翻的人硬拉回来
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-      if (nearBottom) el.scrollTop = el.scrollHeight;
-      return;
-    }
-
-    // 刚切过来（或消息刚拉到）：有记忆就回到原位置，没记忆就贴底
-    restoreForRef.current = null;
-    el.scrollTop = recallScroll(activeId) ?? el.scrollHeight;
-  }, [activeId, messages, recallScroll]);
-
-  // 滚动时把位置记进 Provider —— DOM 会随页面重建，这里才是能活下来的地方
+  // 滚动：判断这是"用户自己往上翻了"还是"我们贴底造成的"。
+  // 贴底不记位置（下次进来本来就该在底部），往上翻了才记。
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || !activeId) return;
-    const onScroll = () => rememberScroll(activeId, el.scrollTop);
+    if (!el) return;
+    const onScroll = () => {
+      const id = activeIdRef.current;
+      if (!id) return;
+      const atBottom = isNearBottom(el);
+      stickRef.current = atBottom;
+      if (atBottom) forgetScroll(id);
+      else rememberScroll(id, el.scrollTop);
+    };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, [activeId, rememberScroll]);
+  }, [forgetScroll, rememberScroll]);
 
   // 这里原本挂了一个 beforeunload 拦截（生成中刷新就弹"更改可能未保存"）。
   // 后来两种模式都能续传了，这个拦截就变成纯粹的骚扰：
@@ -146,17 +234,14 @@ export function ChatView() {
   //   游客：    runId + 已消费的水位存在 localStorage，刷新后从断点接上
   // 所以删掉，别拦用户刷新。
 
-  /**
-   * 该显示骨架吗？
-   *
-   * 判断必须用**同步可得**的 `session.loaded`，不能用 messagesLoading ——
-   * 那个是在 effect 里才置 true 的，于是切到冷会话的第一帧会满足
-   * "messages 为空 + loading 还是 false"，先把 Hero 空态渲染出来，
-   * 下一帧再切成骨架 → 用户看到 Hero 闪一下。
-   * loaded 从列表数据里来，渲染时就有，不存在这个空窗。
-   */
-  const sessionPending = activeSession?.loaded === false;
-  const showSkeleton = !hydrated || sessionPending || (messagesLoading && messages.length === 0);
+  /** 自己发消息 = 想立刻看到回答，不管刚才翻到哪，都重新贴底 */
+  const handleSend = useCallback(
+    (text: string) => {
+      stickRef.current = true;
+      send(text);
+    },
+    [send],
+  );
 
   return (
     <>
@@ -195,7 +280,7 @@ export function ChatView() {
             }}
           />
         ) : (
-          <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
+          <div ref={attachContent} className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
             {messages.map((message) => {
               // data-role 是给端到端测试用的锚点：按角色定位气泡，不依赖样式
               const isEditingThis = editState?.messageId === message.id;
@@ -212,7 +297,6 @@ export function ChatView() {
                 </div>
               );
             })}
-            <div ref={bottomRef} className="h-px" />
           </div>
         )}
       </main>
@@ -226,7 +310,7 @@ export function ChatView() {
         model={model}
         getDraft={getDraft}
         setDraft={setDraft}
-        onSend={send}
+        onSend={handleSend}
         onStop={stop}
       />
     </>
